@@ -4,7 +4,7 @@ set -e
 # --- Configuration ---
 RUNPOD_API_KEY="${RUNPOD_API_KEY}"
 TEMPLATE_NAME="Catalyst-Template"
-DOCKER_IMAGE="your-dockerhub-username/catalyst:latest" # <-- IMPORTANT: Update this to your Docker image
+DOCKER_IMAGE="HeapsGo0d/catalyst"
 LOG_PREFIX="[RunPod-Template]"
 
 # --- Helper Functions ---

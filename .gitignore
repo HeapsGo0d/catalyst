@@ -1,41 +1,26 @@
-# Build artifacts
-build/
-dist/
-*.egg-info/
-
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Environment-specific files
+# Environment files
 .env
-.env.*
-!/.env.example
+.venv
+env/
+venv/
+ENV/
+VENV/
 
-# IDE and editor files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS-specific files
-.DS_Store
-Thumbs.db
-
-# Docker
+# Docker artifacts
 docker-compose.override.yml
-.docker/
 
-# Logs
-*.log
-logs/
+# Downloaded models
+models/
+checkpoints/
+loras/
+embeddings/
 
-# Downloaded models and large files
-/workspace/models/*
-!/workspace/models/.gitkeep
-
-# Temporary files
-tmp/
-temp/
+# IDE files
+.idea/
+.vscode/

@@ -2,7 +2,7 @@
 set -e
 
 # --- Configuration ---
-REPO_URL="https://github.com/your-username/catalyst.git" # <-- IMPORTANT: Update this to your repository URL
+REPO_URL="https://github.com/HeapsGo0d/catalyst"
 INSTALL_DIR="/opt/catalyst"
 LOG_PREFIX="[Catalyst-Updater]"
 
