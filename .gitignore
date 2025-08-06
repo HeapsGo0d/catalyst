@@ -1,0 +1,41 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment-specific files
+.env
+.env.*
+!/.env.example
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+.docker/
+
+# Logs
+*.log
+logs/
+
+# Downloaded models and large files
+/workspace/models/*
+!/workspace/models/.gitkeep
+
+# Temporary files
+tmp/
+temp/

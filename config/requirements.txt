@@ -1,0 +1,13 @@
+# Additional Python dependencies for Catalyst
+
+# For making HTTP requests to APIs (e.g., CivitAI, HuggingFace)
+requests
+
+# For interacting with aria2c for robust downloads
+aria2p
+
+# For managing environment variables
+python-dotenv
+
+# For progress bars in scripts
+tqdm

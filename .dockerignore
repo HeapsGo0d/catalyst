@@ -1,0 +1,39 @@
+# Documentation
+*.md
+docs/
+
+# Version Control
+.git/
+.gitignore
+
+# Development Files
+*.log
+.env*
+tmp/
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Build artifacts and cache
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# Test files
+tests/
+*.test.js
+*.test.py
+
+# Sensitive configuration
+secrets/
+*.pem
+*.key
