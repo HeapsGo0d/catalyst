@@ -59,16 +59,16 @@ download_civitai_models() {
         model_type=$(echo "$response" | jq -r '.type')
         
         local model_version_id
-        model_version_id=$(echo "$response" | jq -r '.modelVersions.id')
+        model_version_id=$(echo "$response" | jq -r '.modelVersions[0].id')
         
         local version_api_url="https://civitai.com/api/v1/model-versions/$model_version_id"
         local version_response
         version_response=$(curl -s "$version_api_url")
 
         local download_url
-        download_url=$(echo "$version_response" | jq -r '.files.downloadUrl')
+        download_url=$(echo "$version_response" | jq -r '.files[0].downloadUrl')
         local filename
-        filename=$(echo "$version_response" | jq -r '.files.name')
+        filename=$(echo "$version_response" | jq -r '.files[0].name')
 
         local dest_dir
         case "$model_type" in
