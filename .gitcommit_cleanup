@@ -6,16 +6,21 @@ cd /home/nathan/dev/catalyst
 echo "Staging cleanup changes..."
 git add -A
 
-echo "Committing cleanup..."
-git commit -m "Clean up repository: remove development artifacts and messy implementations
+# Check if there are staged changes
+if git diff --staged --quiet; then
+  echo "No cleanup changes to commit."
+else
+  echo "Committing cleanup..."
+  git commit -m "Clean up repository: remove development artifacts and messy implementations
 
 - Remove all test_*.sh files from root directory
 - Remove template.sh and ORGANIZER_FALLBACK.md
 - Remove complex start.sh implementation
 - Remove Python organizer to simplify dependencies
 - Prepare for clean implementation based on proven reference patterns"
+fi
 
-echo "Pushing cleanup to GitHub..."
+echo "Pushing changes to GitHub..."
 git push origin main
 
 echo "✅ Repository cleanup synced with GitHub"
