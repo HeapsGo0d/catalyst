@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+cd /home/nathan/dev/catalyst
+
+echo "Staging cleanup changes..."
+git add -A
+
+echo "Committing cleanup..."
+git commit -m "Clean up repository: remove development artifacts and messy implementations"
+
+echo "Pushing cleanup to GitHub..."
+git push origin main

@@ -1,35 +1,29 @@
 # Pinned Python Dependencies for Catalyst
-# PyTorch, torchvision, and torchaudio are installed separately in the Dockerfile
-# with explicit CUDA 12.8 support and version pinning to avoid conflicts.
-# ComfyUI is installed via comfy-cli in the Dockerfile.
+# Based on Nexis and ComfyUI requirements
 
-certifi==2023.7.22 \
-    --hash=sha256:92d6037539857d8206b8f6ae472e8b77db8058fec5937a1ef3f54304089edbb9
-charset-normalizer==3.3.2 \
-    --hash=sha256:90d558489962fd4918143277a773316e56c72da56ec7aa3dc3dbbe20fdfed15b
-idna==3.6 \
-    --hash=sha256:c05567e9c24a6b9faaa835c4821bad0590fbb9d5779e7caa6e1cc4978e7eb24f
-requests==2.31.0 \
-    --hash=sha256:58cd2187c01e70e6e26505bca751777aa9f2ee0b7f4300988b709f44e013003f
-urllib3==2.0.7 \
-    --hash=sha256:fdb6d215c776278489906c2f8916e6e7d4f5a9b602ccbcfdf7f016fc8da0596e
+# ─── Core Dependencies ────────────────────────────────
+certifi==2023.7.22
+charset-normalizer==3.3.2
+idna==3.6
+requests==2.31.0
+urllib3==2.0.7
 
-# Core Python tooling
-packaging==23.2 \
-    --hash=sha256:8c491190033a9af7e1d931d0b5dacc2ef47509b34dd0de67ed209b5203fc88c7
-setuptools==69.0.3 \
-    --hash=sha256:385eb4edd9c9d5c17540511303e39a147ce2fc04bc55289c322b9e5904fe2c05
-wheel==0.42.0 \
-    --hash=sha256:177f9c9b0d45c47873b619f5b650346d632cdc35fb5e4d25058e09c9e581433d
+# ─── ComfyUI Dependencies ─────────────────────────────
+numpy # Added as per user request, version will be resolved by pip
+Pillow # Added as per user request, version will be resolved by pip
+opencv-python-headless==4.8.1.78
+scipy==1.11.4
+scikit-image==0.22.0
+huggingface_hub==0.25.*
+transformers>=4.38.0,<5.0
+trampoline==0.1.2
+aiohttp==3.9.*
+multidict==6.1.*
+yarl==1.12.*
+aiohappyeyeballs==2.4.*
+propcache==0.2.*
 
-# Additional dependencies
-pyyaml==6.0.2 \
-    --hash=sha256:d584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e
-gdown==5.2.0 \
-    --hash=sha256:2145165062d85520a3cd98b356c9ed522c5e7984d408535409fd46f94defc787
-aria2p==0.12.1 \
-    --hash=sha256:1521ccba4a4bb164a023f4c4213513dc3e6f47b91927f5e49dd50678da8c1294
-python-dotenv==1.1.1 \
-    --hash=sha256:a8a6399716257f45be6a007360200409fce5cda2661e3dec71d23dc15f6189ab
-tqdm==4.67.1 \
-    --hash=sha256:f8aef9c52c08c13a65f30ea34f4e5aac3fd1a34959879d7e59e63027286627f2
+# ─── Python Tooling ───────────────────────────────────
+packaging==23.2
+setuptools==69.0.3
+wheel==0.42.0

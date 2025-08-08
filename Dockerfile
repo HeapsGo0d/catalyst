@@ -1,175 +1,156 @@
-# Single-stage build for RunPod reliability
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+# ──────────────────────────────────────────
+# Build stage
+# ──────────────────────────────────────────
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS build
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Consolidated environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_PREFER_BINARY=1 \
     PYTHONUNBUFFERED=1 \
-    CMAKE_BUILD_PARALLEL_LEVEL=8 \
-    PATH="/opt/venv/bin:$PATH"
+    CMAKE_BUILD_PARALLEL_LEVEL=8
 
-# System dependencies, Python, and venv setup
+# System deps + Python 3.11
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        software-properties-common python3-pip \
-        curl ffmpeg ninja-build git aria2 git-lfs wget vim \
-        libgl1 libglib2.0-0 build-essential gcc && \
+        software-properties-common && \
     add-apt-repository ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3.11 python3.11-venv python3.11-dev && \
-    ln -sf /usr/bin/python3.11 /usr/bin/python && \
-    ln -sf /usr/bin/pip3 /usr/bin/pip && \
-    python3.11 -m venv /opt/venv && \
-    apt-get clean && \
+        python3.11 python3.11-venv python3.11-dev \
+        build-essential gcc ninja-build \
+        git curl jq aria2 git-lfs \
+        ffmpeg libgl1 libglib2.0-0 wget vim && \
+    printf "/usr/local/cuda-12.8/lib64\n/usr/local/cuda-12.8/targets/x86_64-linux/lib\n" \
+        > /etc/ld.so.conf.d/cuda.conf && ldconfig && \
     rm -rf /var/lib/apt/lists/*
 
-# Python dependencies and ComfyUI installation with combined config files
-COPY config/ /tmp/config/
+# Self-contained venv
+RUN /usr/bin/python3.11 -m venv --copies /opt/venv && \
+    cp -f /usr/bin/python3.11 /opt/venv/bin/python3.11 && \
+    ln -sf /opt/venv/bin/python3.11 /opt/venv/bin/python && \
+    /opt/venv/bin/python -V
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Build-time config
+COPY config/versions.conf /tmp/versions.conf
+
+# PyTorch (CUDA 12.8 wheels)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r /tmp/config/requirements.txt && \
-    . /tmp/config/versions.conf && pip install torch==${PYTORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} --index-url ${PYTORCH_INDEX_URL} && \
-    pip install opencv-python && \
-    . /tmp/config/versions.conf && \
-    git clone "${COMFYUI_REPO}" /ComfyUI && \
-    cd /ComfyUI && \
-    git checkout "${COMFYUI_VERSION}" && \
+    . /tmp/versions.conf && \
+    python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip install \
+        --index-url ${PYTORCH_INDEX_URL} \
+        torch==${PYTORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION}
+
+# Quick import test
+RUN python - <<'PY'
+import torch, platform
+print("torch", torch.__version__, "cuda", torch.version.cuda, "python", platform.python_version())
+PY
+
+# Base requirements (hash-stripped)
+COPY config/requirements.txt /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    sed -E 's/ --hash=sha256:[a-f0-9]+//g' /tmp/requirements.txt > /tmp/requirements.nohash.txt && \
+    python -m pip install -r /tmp/requirements.nohash.txt
+
+# ComfyUI clone + complete setup
+RUN . /tmp/versions.conf && \
+    mkdir -p /workspace && cd /workspace && \
+    git clone "${COMFYUI_REPO}" && cd ComfyUI && git checkout "${COMFYUI_VERSION}" && \
     pip install -r requirements.txt && \
-    rm -rf /tmp/config
-
-# Install ComfyUI custom nodes with enhanced error handling
-RUN --mount=type=cache,target=/root/.cache/pip \
-    cd /ComfyUI/custom_nodes && \
-    # Initialize error tracking
-    echo "=== ComfyUI Custom Nodes Installation Log ===" > /tmp/custom_nodes_install.log && \
-    echo "Starting installation at $(date)" >> /tmp/custom_nodes_install.log && \
-    FAILED_REPOS="" && \
-    SUCCESSFUL_REPOS="" && \
-    TOTAL_REPOS=0 && \
-    FAILED_COUNT=0 && \
-    for repo in \
-        https://github.com/ssitu/ComfyUI_UltimateSDUpscale.git \
-        https://github.com/kijai/ComfyUI-KJNodes.git \
-        https://github.com/rgthree/rgthree-comfy.git \
-        https://github.com/JPS-GER/ComfyUI_JPS-Nodes.git \
-        https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes.git \
-        https://github.com/Jordach/comfy-plasma.git \
-        https://github.com/ltdrdata/ComfyUI-Impact-Pack.git \
-        https://github.com/Fannovel16/comfyui_controlnet_aux.git \
-        https://github.com/yolain/ComfyUI-Easy-Use.git \
-        https://github.com/kijai/ComfyUI-Florence2.git \
-        https://github.com/WASasquatch/was-node-suite-comfyui.git \
-        https://github.com/theUpsider/ComfyUI-Logic.git \
-        https://github.com/cubiq/ComfyUI_essentials.git \
-        https://github.com/chrisgoringe/cg-image-picker.git \
-        https://github.com/chflame163/ComfyUI_LayerStyle.git \
-        https://github.com/ltdrdata/ComfyUI-Impact-Subpack.git \
-        https://github.com/Jonseed/ComfyUI-Detail-Daemon.git \
-        https://github.com/shadowcz007/comfyui-mixlab-nodes.git \
-        https://github.com/chflame163/ComfyUI_LayerStyle_Advance.git \
-        https://github.com/cubiq/ComfyUI_IPAdapter_plus.git \
-        https://github.com/bash-j/mikey_nodes.git \
-        https://github.com/1038lab/ComfyUI-JoyCaption.git \
-        https://github.com/sipie800/ComfyUI-PuLID-Flux-Enhanced.git \
-        https://github.com/chrisgoringe/cg-use-everywhere.git \
-        https://github.com/M1kep/ComfyLiterals.git; \
-    do \
-        TOTAL_REPOS=$((TOTAL_REPOS + 1)); \
-        repo_name=$(basename "$repo" .git); \
-        echo "Processing repository: $repo_name" >> /tmp/custom_nodes_install.log; \
-        \
-        # Clone repository with error handling
-        echo "  Attempting to clone $repo..." >> /tmp/custom_nodes_install.log; \
-        if [ "$repo" = "https://github.com/ssitu/ComfyUI_UltimateSDUpscale.git" ]; then \
-            if git clone --recursive "$repo" 2>> /tmp/custom_nodes_install.log; then \
-                echo "  ✓ Successfully cloned $repo_name (recursive)" >> /tmp/custom_nodes_install.log; \
-            else \
-                echo "  ✗ FAILED to clone $repo_name (recursive)" >> /tmp/custom_nodes_install.log; \
-                FAILED_REPOS="$FAILED_REPOS $repo_name"; \
-                FAILED_COUNT=$((FAILED_COUNT + 1)); \
-                continue; \
-            fi; \
-        else \
-            if git clone "$repo" 2>> /tmp/custom_nodes_install.log; then \
-                echo "  ✓ Successfully cloned $repo_name" >> /tmp/custom_nodes_install.log; \
-            else \
-                echo "  ✗ FAILED to clone $repo_name" >> /tmp/custom_nodes_install.log; \
-                FAILED_REPOS="$FAILED_REPOS $repo_name"; \
-                FAILED_COUNT=$((FAILED_COUNT + 1)); \
-                continue; \
+    pip install huggingface-cli && \
+    find . -type d | while read -r dir; do \
+        if [ -n "$(find "$dir" -maxdepth 1 -name "*.py" -print -quit)" ]; then \
+            if [ ! -f "$dir/__init__.py" ]; then \
+                touch "$dir/__init__.py"; \
             fi; \
         fi; \
-        \
-        # Remove .git directories to reduce image size
-        rm -rf "$repo_name/.git" 2>/dev/null || true; \
-        \
-        # Install requirements.txt with error handling
-        if [ -f "$repo_name/requirements.txt" ]; then \
-            echo "  Installing requirements for $repo_name..." >> /tmp/custom_nodes_install.log; \
-            if pip install --no-cache-dir -r "$repo_name/requirements.txt" 2>> /tmp/custom_nodes_install.log; then \
-                echo "  ✓ Successfully installed requirements for $repo_name" >> /tmp/custom_nodes_install.log; \
-            else \
-                echo "  ⚠ WARNING: Failed to install requirements for $repo_name (non-critical)" >> /tmp/custom_nodes_install.log; \
-            fi; \
-        else \
-            echo "  No requirements.txt found for $repo_name" >> /tmp/custom_nodes_install.log; \
-        fi; \
-        \
-        # Run install.py script with error handling
-        if [ -f "$repo_name/install.py" ]; then \
-            echo "  Running install script for $repo_name..." >> /tmp/custom_nodes_install.log; \
-            if python "$repo_name/install.py" 2>> /tmp/custom_nodes_install.log; then \
-                echo "  ✓ Successfully ran install script for $repo_name" >> /tmp/custom_nodes_install.log; \
-            else \
-                echo "  ⚠ WARNING: Failed to run install script for $repo_name (non-critical)" >> /tmp/custom_nodes_install.log; \
-            fi; \
-        else \
-            echo "  No install.py found for $repo_name" >> /tmp/custom_nodes_install.log; \
-        fi; \
-        \
-        SUCCESSFUL_REPOS="$SUCCESSFUL_REPOS $repo_name"; \
-        echo "  ✓ Completed processing $repo_name" >> /tmp/custom_nodes_install.log; \
     done && \
-    \
-    # Generate installation summary
-    echo "" >> /tmp/custom_nodes_install.log && \
-    echo "=== Installation Summary ===" >> /tmp/custom_nodes_install.log && \
-    echo "Total repositories processed: $TOTAL_REPOS" >> /tmp/custom_nodes_install.log && \
-    echo "Successfully installed: $((TOTAL_REPOS - FAILED_COUNT))" >> /tmp/custom_nodes_install.log && \
-    echo "Failed installations: $FAILED_COUNT" >> /tmp/custom_nodes_install.log && \
-    \
-    if [ $FAILED_COUNT -gt 0 ]; then \
-        echo "Failed repositories:$FAILED_REPOS" >> /tmp/custom_nodes_install.log; \
-        echo "WARNING: $FAILED_COUNT custom node repositories failed to install" >> /tmp/custom_nodes_install.log; \
-    fi && \
-    \
-    if [ $FAILED_COUNT -lt $TOTAL_REPOS ]; then \
-        echo "Successfully installed repositories:$SUCCESSFUL_REPOS" >> /tmp/custom_nodes_install.log; \
-    fi && \
-    \
-    echo "Installation completed at $(date)" >> /tmp/custom_nodes_install.log && \
-    \
-    # Display summary to build output
-    echo "=== Custom Nodes Installation Summary ===" && \
-    echo "Total: $TOTAL_REPOS | Success: $((TOTAL_REPOS - FAILED_COUNT)) | Failed: $FAILED_COUNT" && \
-    if [ $FAILED_COUNT -gt 0 ]; then \
-        echo "Failed repositories:$FAILED_REPOS"; \
-        echo "Check /tmp/custom_nodes_install.log for detailed error information"; \
-    fi && \
-    \
-    # Clean up pip cache and temporary files in the same layer
-    pip cache purge && \
-    find /tmp -type f -name "*.tmp" -delete && \
-    find /tmp -type f -name "*.log" ! -name "custom_nodes_install.log" -delete
+    for pkg_dir in utils app comfy model_management nodes execution; do \
+        if [ -d "$pkg_dir" ]; then \
+            touch "$pkg_dir/__init__.py"; \
+        fi; \
+    done && \
+    pip install xformers --index-url "${XFORMERS_INDEX_URL}" || \
+    echo "xformers wheel not available; continuing"
 
-# Set up the entrypoint and healthcheck
-COPY src/start_script.sh /start_script.sh
-COPY src/organizer.py /usr/local/bin/organizer.py
-RUN chmod +x /start_script.sh && chmod +x /usr/local/bin/organizer.py
+# ──────────────────────────────────────────
+# Production stage
+# ──────────────────────────────────────────
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS production
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-WORKDIR /ComfyUI
-ENTRYPOINT ["/start_script.sh"]
+# Security environment variables (placeholders)
+ENV PARANOID_MODE=false \
+    SECURITY_LEVEL=normal \
+    NETWORK_MODE=public \
+    ENABLE_FORENSIC_CLEANUP=false \
+    SECURITY_TOKEN_VAULT_PATH=""
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5m --retries=3 \
-  CMD curl -f http://localhost:8188/ || exit 1
+# Copy self-contained venv and Python stdlib
+COPY --from=build /opt/venv /opt/venv
+COPY --from=build /usr/lib/python3.11 /usr/lib/python3.11
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PYTHON="${VIRTUAL_ENV}/bin/python"
+ENV PIP="${VIRTUAL_ENV}/bin/pip"
+
+# Runtime deps
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git curl jq aria2 git-lfs \
+        ffmpeg libgl1 libglib2.0-0 && \
+    printf "/usr/local/cuda-12.8/lib64\n/usr/local/cuda-12.8/targets/x86_64-linux/lib\n" > /etc/ld.so.conf.d/cuda.conf && ldconfig || (echo "CUDA library configuration failed" && exit 1) && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# App user + workspace with proper permissions
+RUN useradd -m comfyuser && \
+    mkdir -p /home/comfyuser/workspace && \
+    mkdir -p /workspace && \
+    chown -R comfyuser:comfyuser /home/comfyuser && \
+    chown -R comfyuser:comfyuser /workspace
+
+# ComfyUI
+COPY --from=build --chown=comfyuser:comfyuser /workspace/ComfyUI /home/comfyuser/workspace/ComfyUI
+
+# Ensure all critical package directories have __init__.py files
+RUN find /home/comfyuser/workspace/ComfyUI -type d | while read -r dir; do \
+        if [ -n "$(find "$dir" -maxdepth 1 -name "*.py" -print -quit)" ]; then \
+            if [ ! -f "$dir/__init__.py" ]; then \
+                touch "$dir/__init__.py"; \
+            fi; \
+        fi; \
+    done && \
+    for pkg_dir in utils app comfy model_management nodes execution; do \
+        full_path="/home/comfyuser/workspace/ComfyUI/$pkg_dir"; \
+        if [ -d "$full_path" ]; then \
+            touch "$full_path/__init__.py"; \
+        fi; \
+    done && \
+    chown -R comfyuser:comfyuser /home/comfyuser/workspace/ComfyUI
+
+# Scripts and configs
+COPY --chown=comfyuser:comfyuser src/ /home/comfyuser/scripts/
+COPY --chown=comfyuser:comfyuser config/ /home/comfyuser/config/
+
+# Fix line endings, make executable, sanity-check venv
+RUN set -euo pipefail; \
+    shopt -s nullglob; \
+    files=(/home/comfyuser/scripts/*.sh); \
+    for f in "${files[@]}"; do sed -i 's/\r$//' "$f"; chmod +x "$f"; done; \
+    echo "PATH=$PATH"; "$PYTHON" -V; "$PIP" -V
+
+WORKDIR /home/comfyuser/workspace
+USER comfyuser
+
+# For recommended security options (e.g., --security-opt=no-new-privileges --cap-drop=ALL), see DOCKER_SECURITY.md
+
+EXPOSE 8188
+HEALTHCHECK --interval=30s --timeout=3s --start-period=45s --retries=5 \
+  CMD curl -fsS http://127.0.0.1:8188/ || exit 1
+
+ENTRYPOINT ["/home/comfyuser/scripts/start.sh"]
