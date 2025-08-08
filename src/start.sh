@@ -2,9 +2,6 @@
 # ==================================================================================
 # CATALYST: CONTAINER STARTUP SCRIPT
 # ==================================================================================
-# This script serves as the container entrypoint. It handles environment
-# validation, security script integration, and the startup of the ComfyUI service.
-# ----------------------------------------------------------------------------------
 
 set -Eeuo pipefail
 
@@ -28,7 +25,6 @@ log_error() {
 trap 'kill ${!}; term_handler' SIGTERM
 term_handler() {
     log "SIGTERM received. Shutting down ComfyUI gracefully..."
-    # Add any specific cleanup tasks here
     wait "${!}"
     log "ComfyUI has been shut down."
     exit 0
@@ -36,9 +32,6 @@ term_handler() {
 
 # --- Pre-Startup Validation and Setup ---
 log "Initializing Catalyst container..."
-
-# Redirect all output to a log file for debugging if needed
-# exec &> >(tee -a "/home/comfyuser/workspace/container.log")
 
 # Validate critical environment
 if [ ! -d "${COMFYUI_DIR}" ]; then
@@ -58,19 +51,47 @@ log "Environment validation passed."
 
 # --- Security Script Integration ---
 log "Running network security placeholder script..."
-bash "${SCRIPTS_DIR}/network_security.sh"
+if [ -f "${SCRIPTS_DIR}/network_security.sh" ]; then
+    bash "${SCRIPTS_DIR}/network_security.sh"
+else
+    log "Warning: network_security.sh not found, skipping..."
+fi
+
+# --- Model Downloads (Nexis Download Manager) ---
+log "Starting model download process..."
+if [ -f "${SCRIPTS_DIR}/nexis_downloader.py" ]; then
+    # Run the Python download manager
+    "${PYTHON_EXEC}" "${SCRIPTS_DIR}/nexis_downloader.py"
+    DOWNLOAD_EXIT_CODE=$?
+    
+    if [ $DOWNLOAD_EXIT_CODE -eq 0 ]; then
+        log "Downloads completed successfully."
+    else
+        log "Downloads completed with some failures (exit code: $DOWNLOAD_EXIT_CODE)."
+        log "Continuing with container startup..."
+    fi
+else
+    log "Warning: nexis_downloader.py not found, skipping downloads..."
+fi
 
 # --- File Organization ---
 log "Running file organizer..."
-bash "${SCRIPTS_DIR}/file_organizer.sh"
+if [ -f "${SCRIPTS_DIR}/file_organizer.sh" ]; then
+    bash "${SCRIPTS_DIR}/file_organizer.sh"
+else
+    log "Warning: file_organizer.sh not found, skipping..."
+fi
 
 # --- ComfyUI Startup ---
 cd "${COMFYUI_DIR}"
-log "Starting ComfyUI server..."
-log "Command: ${PYTHON_EXEC} main.py --listen 0.0.0.0 --port 8188"
+
+# Parse ComfyUI flags from environment
+COMFYUI_FLAGS="${COMFYUI_FLAGS:-}"
+log "Starting ComfyUI server with flags: ${COMFYUI_FLAGS}"
+log "Command: ${PYTHON_EXEC} main.py --listen 0.0.0.0 --port 8188 ${COMFYUI_FLAGS}"
 
 # Launch ComfyUI in the background
-${PYTHON_EXEC} main.py --listen 0.0.0.0 --port 8188 &
+${PYTHON_EXEC} main.py --listen 0.0.0.0 --port 8188 ${COMFYUI_FLAGS} &
 CHILD_PID=$!
 
 # Wait for the process and handle exit codes
@@ -80,13 +101,15 @@ EXIT_CODE=$?
 if [ ${EXIT_CODE} -ne 0 ]; then
     log_error "ComfyUI exited with a non-zero status code: ${EXIT_CODE}."
     log_error "Check the logs above for details."
-    # Optional: Add a delay to allow log inspection before container exits
-    # sleep 60
 fi
 
 # --- Post-Shutdown Cleanup ---
 log "Running forensic cleanup placeholder script..."
-bash "${SCRIPTS_DIR}/forensic_cleanup.sh"
+if [ -f "${SCRIPTS_DIR}/forensic_cleanup.sh" ]; then
+    bash "${SCRIPTS_DIR}/forensic_cleanup.sh"
+else
+    log "Warning: forensic_cleanup.sh not found, skipping..."
+fi
 
 log "Catalyst container has finished execution."
 exit ${EXIT_CODE}
