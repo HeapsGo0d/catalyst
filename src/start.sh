@@ -157,7 +157,7 @@ execute_downloads() {
     fi
     
     # Test Python environment
-    if ! "${PYTHON_EXEC}" -c "import sys; print('Python ready:', sys.version)" >/dev/null 2>&1; then
+    if ! "${PYTHON_EXEC}" -c "import sys; sys.path.insert(0, '${COMFYUI_DIR}'); import main; print('ComfyUI ready')" >/dev/null 2>&1; then
         log_error "Python environment test failed"
         return 1
     fi
@@ -266,7 +266,7 @@ except Exception as e:
     fi
     
     # Parse ComfyUI flags
-    local comfyui_flags=\"${COMFYUI_FLAGS:-}\"
+    local comfyui_flags="${COMFYUI_FLAGS:-}"
     log "Starting ComfyUI server with flags: ${comfyui_flags}"
     
     # Start ComfyUI with proper signal handling
