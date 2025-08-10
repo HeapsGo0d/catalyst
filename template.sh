@@ -82,6 +82,8 @@ IFS=',' read -ra dns_servers <<< "$CUSTOM_DNS_SERVERS"
 for server in "${dns_servers[@]}"; do
   docker_args+=" --dns=$server"
 done
+# Add an in-memory tmpfs for secrets (keeps secrets off disk)
+docker_args+=" --tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m"
 
 PAYLOAD=$(jq -n \
   --arg name "$TEMPLATE_NAME" \
@@ -119,7 +121,8 @@ PAYLOAD=$(jq -n \
           { "key": "NETWORK_MODE", "value": "public" },
           { "key": "SECURITY_LEVEL", "value": "normal" },
           { "key": "PARANOID_MODE", "value": "false" },
-          { "key": "ENABLE_FORENSIC_CLEANUP", "value": "false" }
+          { "key": "ENABLE_FORENSIC_CLEANUP", "value": "false" },
+          { "key": "SECURITY_TOKEN_VAULT_PATH", "value": "/run/secrets/token" }
         ]
       }
     }

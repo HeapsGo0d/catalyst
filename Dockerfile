@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # ──────────────────────────────────────────
 # Build stage
 # ──────────────────────────────────────────
@@ -38,10 +40,10 @@ COPY config/versions.conf /tmp/versions.conf
 # PyTorch (CUDA 12.8 wheels)
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /tmp/versions.conf && \
-    python -m pip install --upgrade pip setuptools wheel && \
-    python -m pip install \
-        --index-url ${PYTORCH_INDEX_URL} \
-        torch==${PYTORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION}
+    python -m pip install --upgrade --no-cache-dir pip setuptools wheel && \
+    python -m pip install --no-cache-dir \
+        --index-url "${PYTORCH_INDEX_URL}" \
+        torch=="${PYTORCH_VERSION}" torchvision=="${TORCHVISION_VERSION}" torchaudio=="${TORCHAUDIO_VERSION}"
 
 # Quick import test
 RUN python - <<'PY'
@@ -53,14 +55,15 @@ PY
 COPY config/requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     sed -E 's/ --hash=sha256:[a-f0-9]+//g' /tmp/requirements.txt > /tmp/requirements.nohash.txt && \
-    python -m pip install -r /tmp/requirements.nohash.txt
+    python -m pip install --no-cache-dir -r /tmp/requirements.nohash.txt
 
 # ComfyUI clone + complete setup
 RUN . /tmp/versions.conf && \
     mkdir -p /workspace && cd /workspace && \
-    git clone "${COMFYUI_REPO}" && cd ComfyUI && git checkout "${COMFYUI_VERSION}" && \
-    pip install -r requirements.txt && \
-    pip install huggingface-cli && \
+    git clone --depth 1 --branch "${COMFYUI_VERSION}" "${COMFYUI_REPO}" ComfyUI && \
+    cd ComfyUI && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir huggingface-cli && \
     find . -type d | while read -r dir; do \
         if [ -n "$(find "$dir" -maxdepth 1 -name "*.py" -print -quit)" ]; then \
             if [ ! -f "$dir/__init__.py" ]; then \
@@ -73,21 +76,26 @@ RUN . /tmp/versions.conf && \
             touch "$pkg_dir/__init__.py"; \
         fi; \
     done && \
-    pip install xformers --index-url "${XFORMERS_INDEX_URL}" || \
-    echo "xformers wheel not available; continuing"
+    pip install --no-cache-dir xformers --index-url "${XFORMERS_INDEX_URL}" || \
+    echo "xformers wheel not available; continuing" && \
+    # strip git metadata to reduce size
+    rm -rf .git
+
+# Final clean in build layer (shrinks what gets copied forward)
+RUN python -m pip cache purge || true && \
+    rm -rf /root/.cache /tmp/*
 
 # ──────────────────────────────────────────
 # Production stage
 # ──────────────────────────────────────────
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS production
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS production
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Security environment variables (placeholders)
 ENV PARANOID_MODE=false \
     SECURITY_LEVEL=normal \
     NETWORK_MODE=public \
-    ENABLE_FORENSIC_CLEANUP=false \
-    SECURITY_TOKEN_VAULT_PATH=""
+    ENABLE_FORENSIC_CLEANUP=false
 
 # Copy self-contained venv and Python stdlib
 COPY --from=build /opt/venv /opt/venv

@@ -14,6 +14,19 @@ STARTUP_ERROR_LOG="/home/comfyuser/workspace/startup_errors.log"
 MODELS_DIR="/home/comfyuser/workspace/models"
 DOWNLOADS_TMP="/home/comfyuser/workspace/downloads_tmp"
 
+# Default secret location if not provided at runtime
+: "${SECURITY_TOKEN_VAULT_PATH:=/run/secrets/token}"
+
+# Materialize secrets (if provided) into the tmpfs file
+mkdir -p /run/secrets
+if [ -n "${HUGGINGFACE_TOKEN:-}" ] || [ -n "${CIVITAI_TOKEN:-}" ]; then
+    {
+        [ -n "${HUGGINGFACE_TOKEN:-}" ] && echo "HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}"
+        [ -n "${CIVITAI_TOKEN:-}" ]     && echo "CIVITAI_TOKEN=${CIVITAI_TOKEN}"
+    } > "${SECURITY_TOKEN_VAULT_PATH}"
+    chmod 600 "${SECURITY_TOKEN_VAULT_PATH}"
+fi
+
 # --- Logging Functions ---
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} $1"
@@ -253,7 +266,7 @@ except Exception as e:
     fi
     
     # Parse ComfyUI flags
-    local comfyui_flags="${COMFYUI_FLAGS:-}"
+    local comfyui_flags=\"${COMFYUI_FLAGS:-}\"
     log "Starting ComfyUI server with flags: ${comfyui_flags}"
     
     # Start ComfyUI with proper signal handling
