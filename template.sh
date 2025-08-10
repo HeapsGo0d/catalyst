@@ -12,6 +12,19 @@ readonly IMAGE_NAME="heapsgo0d/catalyst:v1.0.0"
 readonly TEMPLATE_NAME="ComfyUI FLUX - Project Catalyst"
 readonly CUSTOM_DNS_SERVERS="${CUSTOM_DNS_SERVERS:-"8.8.8.8,1.1.1.1"}" # Default to Google and Cloudflare
 
+# ─── Docker Arguments Construction ─────────────────────────────────
+# Build the docker arguments string with required capabilities for GPU/network
+docker_args="--security-opt=no-new-privileges"
+docker_args+=" --cap-drop=ALL"
+docker_args+=" --cap-add=SETUID --cap-add=SETGID --cap-add=DAC_OVERRIDE"  # Required for file operations
+docker_args+=" --cap-add=NET_BIND_SERVICE"  # Required for binding ports
+IFS=',' read -ra dns_servers <<< "$CUSTOM_DNS_SERVERS"
+for server in "${dns_servers[@]}"; do
+  docker_args+=" --dns=$server"
+done
+# Add an in-memory tmpfs for secrets (keeps secrets off disk)
+docker_args+=" --tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m"
+
 # ─── Pre-flight Checks ──────────────────────────────────────────────────────
 if [[ -z "${RUNPOD_API_KEY:-}" ]]; then
   echo "❌ Error: RUNPOD_API_KEY environment variable is not set." >&2
@@ -57,7 +70,7 @@ This template provides a security-hardened, production-ready environment for Com
 ### 🧰 Technical Specifications:
 - **Base Image**: `nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04`
 - **Python**: 3.11 with optimized virtual environment
-- **Default Temp Storage**: 50 GB (adjustable)
+- **Default Temp Storage**: 200 GB container, 100 GB volume
 - **Security**: Non-root execution, capability dropping, privilege escalation prevention
 EOF
 )
@@ -76,20 +89,11 @@ EOF
 
 # ─── API Payload Construction ───────────────────────────────────────────────
 # Build the final JSON payload using jq for safety and correctness.
-# Build the docker arguments string dynamically
-docker_args="--security-opt=no-new-privileges --cap-drop=ALL"
-IFS=',' read -ra dns_servers <<< "$CUSTOM_DNS_SERVERS"
-for server in "${dns_servers[@]}"; do
-  docker_args+=" --dns=$server"
-done
-# Add an in-memory tmpfs for secrets (keeps secrets off disk)
-docker_args+=" --tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=1m"
-
 PAYLOAD=$(jq -n \
   --arg name "$TEMPLATE_NAME" \
   --arg imageName "$IMAGE_NAME" \
-  --argjson cDisk 150 \
-  --argjson vGb 0 \
+  --argjson cDisk 200 \
+  --argjson vGb 100 \
   --arg vPath "/runpod-volume" \
   --arg dArgs "$docker_args" \
   --arg ports "8188/http" \
@@ -109,7 +113,7 @@ PAYLOAD=$(jq -n \
         "readme": $readme,
         "env": [
           { "key": "DEBUG_MODE", "value": "false" },
-          { "key": "COMFYUI_FLAGS", "value": "--bf16-unet" },
+          { "key": "COMFYUI_FLAGS", "value": "--bf16-unet --highvram --gpu-only" },
           { "key": "FB_USERNAME", "value": "admin" },
           { "key": "FB_PASSWORD", "value": "{{ RUNPOD_SECRET_FILEBROWSER_PASSWORD }}" },
           { "key": "HUGGINGFACE_TOKEN", "value": "{{ RUNPOD_SECRET_huggingface.co }}" },
@@ -118,11 +122,22 @@ PAYLOAD=$(jq -n \
           { "key": "CIVITAI_CHECKPOINTS_TO_DOWNLOAD", "value": "1569593,919063,450105" },
           { "key": "CIVITAI_LORAS_TO_DOWNLOAD", "value": "182404,445135,871108" },
           { "key": "CIVITAI_VAES_TO_DOWNLOAD", "value": "1674314" },
+          { "key": "DOWNLOAD_TIMEOUT", "value": "3600" },
+          { "key": "VERIFY_CHECKSUMS", "value": "true" },
           { "key": "NETWORK_MODE", "value": "public" },
           { "key": "SECURITY_LEVEL", "value": "normal" },
           { "key": "PARANOID_MODE", "value": "false" },
           { "key": "ENABLE_FORENSIC_CLEANUP", "value": "false" },
-          { "key": "SECURITY_TOKEN_VAULT_PATH", "value": "/run/secrets/token" }
+          { "key": "SECURITY_TOKEN_VAULT_PATH", "value": "/run/secrets/token" },
+          { "key": "PYTHONPATH", "value": "/home/comfyuser/workspace/ComfyUI" },
+          { "key": "CUDA_VISIBLE_DEVICES", "value": "all" },
+          { "key": "NVIDIA_VISIBLE_DEVICES", "value": "all" },
+          { "key": "OMP_NUM_THREADS", "value": "8" },
+          { "key": "PYTORCH_CUDA_ALLOC_CONF", "value": "max_split_size_mb:1024" },
+          { "key": "CUDA_LAUNCH_BLOCKING", "value": "0" },
+          { "key": "CONTAINER_USER", "value": "comfyuser" },
+          { "key": "CONTAINER_UID", "value": "1000" },
+          { "key": "CONTAINER_GID", "value": "1000" }
         ]
       }
     }

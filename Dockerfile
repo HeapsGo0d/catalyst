@@ -1,7 +1,5 @@
-# syntax=docker/dockerfile:1.7
-
 # ──────────────────────────────────────────
-# Build stage
+# Build stage (non-root for pip/git work)
 # ──────────────────────────────────────────
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -11,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     CMAKE_BUILD_PARALLEL_LEVEL=8
 
-# System deps + Python 3.11
+# Root-only: system deps + Python 3.11
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -27,63 +25,73 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         > /etc/ld.so.conf.d/cuda.conf && ldconfig && \
     rm -rf /var/lib/apt/lists/*
 
-# Self-contained venv
+# Create venv (root), then hand off to a non-root user
 RUN /usr/bin/python3.11 -m venv --copies /opt/venv && \
     cp -f /usr/bin/python3.11 /opt/venv/bin/python3.11 && \
-    ln -sf /opt/venv/bin/python3.11 /opt/venv/bin/python && \
-    /opt/venv/bin/python -V
-ENV PATH="/opt/venv/bin:$PATH"
+    ln -sf /opt/venv/bin/python3.11 /opt/venv/bin/python
+
+# Create unprivileged builder user and grant ownership where needed
+RUN groupadd -g 1000 builder && useradd -m -u 1000 -g 1000 builder && \
+    mkdir -p /workspace /home/builder/.cache/pip && \
+    chown -R builder:builder /opt/venv /workspace /home/builder
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PYTHON="${VIRTUAL_ENV}/bin/python"
+ENV PIP="${VIRTUAL_ENV}/bin/pip"
+ENV PIP_CACHE_DIR=/home/builder/.cache/pip
+
+# Drop privileges for the rest of the build
+USER builder
+WORKDIR /workspace
+ENV HOME=/home/builder   # tools and configs will default here
 
 # Build-time config
-COPY config/versions.conf /tmp/versions.conf
+COPY --chown=builder:builder config/versions.conf /tmp/versions.conf
 
 # PyTorch (CUDA 12.8 wheels)
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/home/builder/.cache/pip,uid=1000,gid=1000 \
     . /tmp/versions.conf && \
-    python -m pip install --upgrade --no-cache-dir pip setuptools wheel && \
-    python -m pip install --no-cache-dir \
+    ${PYTHON} -m pip install --upgrade --no-cache-dir pip setuptools wheel && \
+    ${PYTHON} -m pip install --no-cache-dir \
         --index-url "${PYTORCH_INDEX_URL}" \
         torch=="${PYTORCH_VERSION}" torchvision=="${TORCHVISION_VERSION}" torchaudio=="${TORCHAUDIO_VERSION}"
 
 # Quick import test
-RUN python - <<'PY'
+RUN ${PYTHON} - <<'PY'
 import torch, platform
 print("torch", torch.__version__, "cuda", torch.version.cuda, "python", platform.python_version())
 PY
 
 # Base requirements (hash-stripped)
-COPY config/requirements.txt /tmp/requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
+COPY --chown=builder:builder config/requirements.txt /tmp/requirements.txt
+RUN --mount=type=cache,target=/home/builder/.cache/pip,uid=1000,gid=1000 \
     sed -E 's/ --hash=sha256:[a-f0-9]+//g' /tmp/requirements.txt > /tmp/requirements.nohash.txt && \
-    python -m pip install --no-cache-dir -r /tmp/requirements.nohash.txt
+    ${PYTHON} -m pip install --no-cache-dir -r /tmp/requirements.nohash.txt
 
 # ComfyUI clone + complete setup
 RUN . /tmp/versions.conf && \
-    mkdir -p /workspace && cd /workspace && \
-    git clone --depth 1 --branch "${COMFYUI_VERSION}" "${COMFYUI_REPO}" ComfyUI && \
-    cd ComfyUI && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir huggingface-cli && \
+    git clone --depth 1 --branch "${COMFYUI_VERSION}" "${COMFYUI_REPO}" /workspace/ComfyUI && \
+    cd /workspace/ComfyUI && \
+    ${PIP} install --no-cache-dir -r requirements.txt && \
+    ${PIP} install --no-cache-dir huggingface-cli && \
     find . -type d | while read -r dir; do \
         if [ -n "$(find "$dir" -maxdepth 1 -name "*.py" -print -quit)" ]; then \
-            if [ ! -f "$dir/__init__.py" ]; then \
-                touch "$dir/__init__.py"; \
-            fi; \
+            [ -f "$dir/__init__.py" ] || touch "$dir/__init__.py"; \
         fi; \
     done && \
     for pkg_dir in utils app comfy model_management nodes execution; do \
-        if [ -d "$pkg_dir" ]; then \
-            touch "$pkg_dir/__init__.py"; \
-        fi; \
+        [ -d "$pkg_dir" ] && touch "$pkg_dir/__init__.py"; \
     done && \
-    pip install --no-cache-dir xformers --index-url "${XFORMERS_INDEX_URL}" || \
+    ${PIP} install --no-cache-dir xformers --index-url "${XFORMERS_INDEX_URL}" || \
     echo "xformers wheel not available; continuing" && \
-    # strip git metadata to reduce size
     rm -rf .git
 
-# Final clean in build layer (shrinks what gets copied forward)
-RUN python -m pip cache purge || true && \
-    rm -rf /root/.cache /tmp/*
+# Final clean in build layer (non-root)
+RUN ${PYTHON} -m pip cache purge || true && \
+    rm -rf /home/builder/.cache/pip/* /tmp/*
+
+
 
 # ──────────────────────────────────────────
 # Production stage
