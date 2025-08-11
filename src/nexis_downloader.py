@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 from urllib.parse import urlparse
 
 import requests
@@ -179,7 +179,7 @@ class NexisDownloader:
 
     def get_civitai_model_info(self, model_id: str, token: Optional[str] = None) -> Optional[dict]:
         """Get model file metadata from CivitAI."""
-        headers = {}
+        headers: Dict[str, str] = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
@@ -238,7 +238,7 @@ class NexisDownloader:
         self.log(f"Download URL: {download_url}", is_debug=True)
 
         # 2) resolve one-hop redirect to presigned R2 URL
-        headers_dict = {}
+        headers_dict: Dict[str, str] = {}
         if token and token.strip():
             headers_dict["Authorization"] = f"Bearer {token.strip()}"
 
@@ -355,3 +355,123 @@ class NexisDownloader:
                 self.log(f"❌ CHECKSUM MISMATCH for {file_path.name}:")
                 self.log(f"   Expected: {expected_hash_clean}")
                 self.log(f"   Actual:   {actual_hash}")
+                return False
+
+        except subprocess.CalledProcessError as e:
+            self.log(f"❌ CHECKSUM ERROR: sha256sum failed for {file_path.name}")
+            if e.stderr:
+                self.log(f"   stderr: {e.stderr.strip()}", is_debug=True)
+            return False
+        except Exception as e:
+            self.log(f"❌ CHECKSUM ERROR: {type(e).__name__}: {e}")
+            return False
+
+    # ---------- orchestrators ----------
+
+    def process_civitai_downloads(self, download_list: str, model_type: str, token: Optional[str] = None) -> Tuple[int, int]:
+        """Process comma-separated list of CivitAI model-version IDs."""
+        if not download_list:
+            self.log(f"No Civitai {model_type}s specified to download.")
+            return (0, 0)
+
+        self.log(f"Found Civitai {model_type}s to download...")
+        self.log(f"Processing list: {download_list}", is_debug=True)
+
+        ids = [mid.strip() for mid in download_list.split(",") if mid.strip()]
+        successful, failed = 0, 0
+
+        for model_id in ids:
+            if self.download_civitai_model(model_id, model_type, token):
+                successful += 1
+            else:
+                failed += 1
+                self.log(f"⏭️ Continuing with remaining {model_type}s...")
+
+        self.log(f"Civitai {model_type}s complete: {successful} successful, {failed} failed")
+        return (successful, failed)
+
+    def create_directory_structure(self) -> None:
+        """Create organized directory structure in downloads_tmp."""
+        for dir_name in ("checkpoints", "loras", "vae", "huggingface"):
+            dir_path = self.download_tmp_dir / dir_name
+            dir_path.mkdir(exist_ok=True)
+            self.log(f"Ensured directory: {dir_path}", is_debug=True)
+
+
+def main() -> int:
+    """Main download orchestration with enhanced error handling."""
+    # Env (global DEBUG_MODE)
+    debug_mode = os.getenv("DEBUG_MODE", "false").lower() == "true"
+    hf_repos = os.getenv("HF_REPOS_TO_DOWNLOAD", "")
+    hf_token = os.getenv("HUGGINGFACE_TOKEN", "")
+    civitai_token = os.getenv("CIVITAI_TOKEN", "")
+    civitai_checkpoints = os.getenv("CIVITAI_CHECKPOINTS_TO_DOWNLOAD", "")
+    civitai_loras = os.getenv("CIVITAI_LORAS_TO_DOWNLOAD", "")
+    civitai_vaes = os.getenv("CIVITAI_VAES_TO_DOWNLOAD", "")
+
+    # Init
+    downloader = NexisDownloader(debug_mode=debug_mode)
+    downloader.log("Initializing Nexis Python download manager...")
+
+    if debug_mode:
+        downloader.log("Debug mode enabled - detailed progress on", is_debug=True)
+        downloader.log(f"HF_REPOS_TO_DOWNLOAD: {hf_repos or '<empty>'}", is_debug=True)
+        downloader.log(f"CIVITAI_CHECKPOINTS_TO_DOWNLOAD: {civitai_checkpoints or '<empty>'}", is_debug=True)
+        downloader.log(f"CIVITAI_LORAS_TO_DOWNLOAD: {civitai_loras or '<empty>'}", is_debug=True)
+        downloader.log(f"CIVITAI_VAES_TO_DOWNLOAD: {civitai_vaes or '<empty>'}", is_debug=True)
+
+    # Network readiness
+    if not downloader.wait_for_network_ready(timeout=60):
+        downloader.log("❌ Network not ready, aborting downloads")
+        return 1
+
+    # Token validation (non-fatal)
+    hf_valid, civitai_valid = downloader.validate_tokens(hf_token, civitai_token)
+    if hf_repos and not hf_valid:
+        downloader.log("⚠️ HF downloads requested but token validation failed")
+    if (civitai_checkpoints or civitai_loras or civitai_vaes) and not civitai_valid:
+        downloader.log("⚠️ CivitAI downloads requested but token validation failed")
+
+    # Prepare FS
+    downloader.create_directory_structure()
+
+    # Execute downloads
+    total_downloads = 0
+    total_failures = 0
+
+    # HuggingFace
+    if hf_repos and hf_valid:
+        hf_ok, hf_fail = downloader.download_hf_repos(hf_repos, hf_token)
+        total_downloads += (hf_ok + hf_fail)
+        total_failures += hf_fail
+    elif hf_repos:
+        downloader.log("Skipping HuggingFace downloads due to token validation failure")
+        total_failures += len([repo.strip() for repo in hf_repos.split(",") if repo.strip()])
+
+    # CivitAI (allow no token for public)
+    if civitai_valid or not civitai_token:
+        ck_ok, ck_fail = downloader.process_civitai_downloads(civitai_checkpoints, "checkpoints", civitai_token)
+        lr_ok, lr_fail = downloader.process_civitai_downloads(civitai_loras, "loras", civitai_token)
+        va_ok, va_fail = downloader.process_civitai_downloads(civitai_vaes, "vae", civitai_token)
+
+        total_downloads += (ck_ok + ck_fail + lr_ok + lr_fail + va_ok + va_fail)
+        total_failures += (ck_fail + lr_fail + va_fail)
+    else:
+        downloader.log("Skipping CivitAI downloads due to token validation failure")
+        for downloads in (civitai_checkpoints, civitai_loras, civitai_vaes):
+            if downloads:
+                total_failures += len([mid.strip() for mid in downloads.split(",") if mid.strip()])
+
+    downloader.log(f"All downloads complete. Total: {total_downloads}, Failures: {total_failures}")
+
+    # Exit: 0 = all ok, 2 = partial, 1 = none
+    if total_failures == 0:
+        return 0
+    elif total_failures < total_downloads:
+        return 2
+    else:
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

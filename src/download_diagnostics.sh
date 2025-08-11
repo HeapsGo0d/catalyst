@@ -12,6 +12,12 @@
 
 set -euo pipefail
 
+# Enable shell trace when DEBUG_MODE=true
+if [[ "${DEBUG_MODE:-false}" == "true" ]]; then
+  set -x
+fi
+
+
 echo "[DIAG] === Catalyst Download Diagnostics ==="
 echo ""
 

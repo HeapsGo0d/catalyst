@@ -32,6 +32,14 @@ log()       { echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} $*"; }
 log_debug() { [ "${LOG_LEVEL}" = "debug" ] && log "[debug] $*"; }
 log_error() { echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} [ERROR] $*" | tee -a "${STARTUP_ERROR_LOG}"; }
 
+# --- Make DEBUG_MODE control global verbosity ---
+# If DEBUG_MODE=true, flip the whole script to verbose logging.
+if [[ "${DEBUG_MODE:-false}" == "true" ]]; then
+  LOG_LEVEL=debug
+  export DEBUG_MODE=true
+fi
+
+
 # --- Signal Handling for Graceful Shutdown ---
 term_handler() {
   log "SIGTERM received. Shutting down…"
@@ -44,28 +52,42 @@ trap 'kill ${!} 2>/dev/null || true; term_handler' SIGTERM
 
 # --- Wait Helpers ---
 wait_for_path() {
-  local path="$1"; local timeout="${2:-30}"; local counter=0
-  while [ ! -e "$path" ] && [ $counter -lt $timeout ]; do sleep 1; counter=$((counter + 1)); done
-  [ -e "$path" ] || { log_error "Timeout waiting for path: $path"; return 1; }
+  local path="$1"
+  local tmo="${2:-30}"
+  local counter=0
+  while [ ! -e "$path" ] && [ $counter -lt $tmo ]; do
+    sleep 1
+    counter=$((counter + 1))
+  done
+  if [ ! -e "$path" ]; then
+    log_error "Timeout waiting for path: $path"
+    return 1
+  fi
   return 0
 }
 
+
 # --- Network Readiness Check ---
 wait_for_network_ready() {
-  local timeout="${1:-90}" max_attempts=$((timeout / 3)) attempt=0
-  log "Checking network… (timeout ${timeout}s)"
+  local tmo="${1:-90}"
+  local max_attempts=$(( tmo / 3 ))
+  local attempt=0
+  log "Checking network… (timeout ${tmo}s)"
   while [ $attempt -lt $max_attempts ]; do
-    local all_ready=true
-    curl -s --connect-timeout 5 --max-time 10 "https://8.8.8.8" >/dev/null 2>&1 || all_ready=false
-    $all_ready && curl -s --connect-timeout 5 --max-time 10 "https://google.com" >/dev/null 2>&1 || all_ready=false
-    $all_ready && curl -s --connect-timeout 5 --max-time 10 "https://civitai.com" >/dev/null 2>&1 || all_ready=false
-    $all_ready && curl -s --connect-timeout 5 --max-time 10 "https://huggingface.co" >/dev/null 2>&1 || all_ready=false
-    if $all_ready; then log "Network OK"; return 0; fi
-    attempt=$((attempt + 1)); sleep 3
+    if curl -s --connect-timeout 5 --max-time 10 https://8.8.8.8 >/dev/null 2>&1 \
+      && curl -s --connect-timeout 5 --max-time 10 https://google.com >/dev/null 2>&1 \
+      && curl -s --connect-timeout 5 --max-time 10 https://civitai.com >/dev/null 2>&1 \
+      && curl -s --connect-timeout 5 --max-time 10 https://huggingface.co >/dev/null 2>&1; then
+      log "Network OK"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 3
   done
   log_error "Network check failed"
   return 1
 }
+
 
 # --- Safe Python/ComfyUI probe (no GPU-touching imports) ---
 python_env_probe() {
@@ -143,7 +165,8 @@ execute_downloads() {
   [ -f "${SCRIPTS_DIR}/nexis_downloader.py" ] || { log_error "Downloader missing: ${SCRIPTS_DIR}/nexis_downloader.py"; return 1; }
   wait_for_path "${PYTHON_EXEC}" 10 && check_python_core || { log_error "Python core check failed"; return 1; }
 
-  python_env_probe || true
+  [[ "${DEBUG_MODE:-false}" == "true" ]] && python_env_probe || true
+
 
   # Brief token sanity (info only)
   [ -n "${HF_REPOS_TO_DOWNLOAD:-}" ] && [ -z "${HUGGINGFACE_TOKEN:-}" ] && log "HF repos set; no HUGGINGFACE_TOKEN (private/gated may fail)"
@@ -192,7 +215,8 @@ start_services() {
   log "Starting services…"
   cd "${COMFYUI_DIR}" || { log_error "Cannot access ComfyUI dir: ${COMFYUI_DIR}"; return 1; }
 
-  python_env_probe || true
+  [[ "${DEBUG_MODE:-false}" == "true" ]] && python_env_probe || true
+
 
   local comfyui_flags; comfyui_flags="$(decide_comfyui_flags 2>/dev/null)"; [ -n "$comfyui_flags" ] || comfyui_flags=""
   if [[ "$comfyui_flags" == *"--cpu"* ]]; then log "Running ComfyUI in CPU mode"; else log "Running ComfyUI with CUDA"; fi
