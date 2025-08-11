@@ -32,10 +32,19 @@ docker-compose.override.yml
 *.log
 logs/
 
-# Downloaded models and large files
-/workspace/models/*
-!/workspace/models/.gitkeep
-
 # Temporary files
 tmp/
 temp/.gitcommit_cleanup
+
+# -----------------------------
+# Heavy runtime artifacts (do NOT commit)
+# (mirror of dockerignore intent)
+models/
+checkpoints/
+downloads_tmp/
+workspace/*
+!workspace/.keep
+
+# Back-compat with your old rule path
+/workspace/models/*
+!/workspace/models/.gitkeep
