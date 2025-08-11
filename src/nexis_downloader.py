@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Nexis Download Manager - Python Implementation
-Combines Hearmeman's reliable CivitAI approach with Phoenix's parallel processing capabilities
+Fixed version with proper network timing and CivitAI API usage
 """
 
 import os
@@ -9,6 +9,7 @@ import json
 import sys
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import requests
@@ -29,8 +30,8 @@ class NexisDownloader:
         """Create a requests session with retry logic."""
         session = requests.Session()
         retry_strategy = Retry(
-            total=5,
-            backoff_factor=1,
+            total=3,  # Reduced from 5 to be gentler
+            backoff_factor=2,  # Increased backoff
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS"],
             respect_retry_after_header=True,
@@ -38,6 +39,9 @@ class NexisDownloader:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
+        
+        # Set proper user agent
+        session.headers.update({"User-Agent": "Catalyst/1.0"})
         return session
 
     def _require_tools(self, *tools: str) -> bool:
@@ -54,6 +58,81 @@ class NexisDownloader:
             return
         prefix = "[DOWNLOAD-DEBUG]" if is_debug else "[DOWNLOAD]"
         print(f"  {prefix} {message}")
+
+    def wait_for_network_ready(self, timeout: int = 60) -> bool:
+        """Wait for network connectivity before attempting downloads."""
+        self.log("Checking network readiness...")
+        
+        test_urls = [
+            "https://8.8.8.8",  # Google DNS - basic connectivity
+            "https://civitai.com",  # CivitAI accessibility
+            "https://huggingface.co"  # HuggingFace accessibility
+        ]
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            all_ready = True
+            for url in test_urls:
+                try:
+                    response = self.session.head(url, timeout=5)
+                    if response.status_code not in [200, 301, 302]:
+                        all_ready = False
+                        break
+                except Exception:
+                    all_ready = False
+                    break
+            
+            if all_ready:
+                self.log("✅ Network connectivity confirmed")
+                return True
+            
+            self.log("Waiting for network connectivity...", is_debug=True)
+            time.sleep(2)
+        
+        self.log("❌ Network readiness timeout")
+        return False
+
+    def validate_tokens(self, hf_token: str | None, civitai_token: str | None) -> tuple[bool, bool]:
+        """Validate API tokens before starting downloads."""
+        hf_valid = True  # Default to valid if no token provided
+        civitai_valid = True
+        
+        # Test HuggingFace token if provided
+        if hf_token:
+            try:
+                response = self.session.get(
+                    "https://huggingface.co/api/whoami-v2",
+                    headers={"Authorization": f"Bearer {hf_token}"},
+                    timeout=10
+                )
+                hf_valid = response.status_code == 200
+                if hf_valid:
+                    self.log("✅ HuggingFace token validated")
+                else:
+                    self.log("❌ HuggingFace token validation failed")
+            except Exception as e:
+                self.log(f"HuggingFace token validation error: {e}")
+                hf_valid = False
+        
+        # Test CivitAI token with a known public model if provided
+        if civitai_token:
+            try:
+                # Test with a known public model version
+                response = self.session.get(
+                    "https://civitai.com/api/v1/model-versions/128713",
+                    headers={"Authorization": f"Bearer {civitai_token}"},
+                    timeout=10
+                )
+                civitai_valid = response.status_code == 200
+                if civitai_valid:
+                    self.log("✅ CivitAI token validated")
+                else:
+                    self.log("❌ CivitAI token validation failed")
+            except Exception as e:
+                self.log(f"CivitAI token validation error: {e}")
+                civitai_valid = False
+        
+        return hf_valid, civitai_valid
 
     # ---------- Hugging Face ----------
 
@@ -120,7 +199,7 @@ class NexisDownloader:
     # ---------- CivitAI ----------
 
     def get_civitai_model_info(self, model_id: str, token: str | None = None) -> dict | None:
-        """Get model info from CivitAI API using model-versions endpoint."""
+        """Get model info from CivitAI API using proper approach."""
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -135,14 +214,33 @@ class NexisDownloader:
             if response.status_code == 200:
                 data = response.json()
                 files = data.get("files") or []
-                if files:
-                    file_info = files[0]
-                    sha = (file_info.get("hashes") or {}).get("SHA256", "")
-                    return {
-                        "filename": file_info.get("name"),
-                        "download_url": f"https://civitai.com/api/download/models/{model_id}?type=Model&format=SafeTensor",
-                        "hash": sha.strip().lower(),
-                    }
+                if not files:
+                    self.log(f"No files found for model {model_id}")
+                    return None
+                
+                # Find the primary file or use the first one
+                primary_file = None
+                for file_info in files:
+                    if file_info.get("primary", False):
+                        primary_file = file_info
+                        break
+                
+                if not primary_file:
+                    primary_file = files[0]  # Fallback to first file
+                
+                # Get the proper download URL from API response
+                download_url = primary_file.get("downloadUrl")
+                if not download_url:
+                    # Fallback construction if downloadUrl not in response
+                    download_url = f"https://civitai.com/api/download/models/{model_id}"
+                
+                sha = (primary_file.get("hashes") or {}).get("SHA256", "")
+                return {
+                    "filename": primary_file.get("name"),
+                    "download_url": download_url,
+                    "hash": sha.strip().lower() if sha else "",
+                    "size": primary_file.get("sizeKB", 0) * 1024,
+                }
 
             self.log(f"Invalid API response structure for model {model_id}", is_debug=True)
             return None
@@ -152,7 +250,7 @@ class NexisDownloader:
             return None
 
     def download_civitai_model(self, model_id: str, model_type: str, token: str | None = None) -> bool:
-        """Download a single model from CivitAI using aria2c with Authorization header."""
+        """Download a single model from CivitAI with proper error handling."""
         if not model_id:
             return True
 
@@ -185,19 +283,20 @@ class NexisDownloader:
 
         self.log(f"Starting Civitai download: {filename} ({model_type})")
 
-        # Use header for token; avoid leaking in URLs/process list
+        # Prepare headers with better authentication handling
         headers = []
         if token and token.strip():
             headers += [f"--header=Authorization: Bearer {token.strip()}"]
             self.log("Using Authorization header for CivitAI", is_debug=True)
 
+        # Enhanced aria2c command with better error handling
         cmd = [
             "aria2c",
-            "-x",
-            "8",
-            "-s",
-            "8",
+            "-x", "4",  # Reduced connections to be gentler
+            "-s", "4",
             "--continue=true",
+            "--retry-wait=5",  # Wait between retries
+            "--max-tries=2",   # Internal aria2c retries
             "--console-log-level=info" if self.debug_mode else "--console-log-level=warn",
             "--summary-interval=10" if self.debug_mode else "--summary-interval=0",
             f"--dir={model_dir}",
@@ -249,8 +348,15 @@ class NexisDownloader:
                 except Exception:
                     pass
 
+            # Enhanced error analysis
             stderr_s = (e.stderr or "").lower() if isinstance(e.stderr, str) else ""
-            if "403" in stderr_s or "forbidden" in stderr_s:
+            if e.returncode == 22:  # HTTP error
+                self.log("   HINT: HTTP error - likely authentication or URL issue.")
+                if not token:
+                    self.log("   HINT: Try providing a valid CIVITAI_TOKEN.")
+                else:
+                    self.log("   HINT: Check your token permissions and model access.")
+            elif "403" in stderr_s or "forbidden" in stderr_s:
                 self.log("   HINT: Private model. Provide a valid CIVITAI_TOKEN.")
             elif "404" in stderr_s or "not found" in stderr_s:
                 self.log(f"   HINT: Model ID {model_id} may not exist or was removed.")
@@ -339,7 +445,7 @@ class NexisDownloader:
 
 
 def main() -> int:
-    """Main download orchestration."""
+    """Main download orchestration with enhanced error handling."""
     # Env
     debug_mode = os.getenv("DEBUG_MODE", "false").lower() == "true"
     hf_repos = os.getenv("HF_REPOS_TO_DOWNLOAD", "")
@@ -360,16 +466,52 @@ def main() -> int:
         downloader.log(f"CIVITAI_LORAS_TO_DOWNLOAD: {civitai_loras or '<empty>'}", is_debug=True)
         downloader.log(f"CIVITAI_VAES_TO_DOWNLOAD: {civitai_vaes or '<empty>'}", is_debug=True)
 
+    # *** NEW: Network readiness check ***
+    if not downloader.wait_for_network_ready(timeout=60):
+        downloader.log("❌ Network not ready, aborting downloads")
+        return 1
+
+    # *** NEW: Token validation ***
+    hf_valid, civitai_valid = downloader.validate_tokens(hf_token, civitai_token)
+    
+    if hf_repos and not hf_valid:
+        downloader.log("⚠️ HuggingFace downloads requested but token validation failed")
+    
+    if (civitai_checkpoints or civitai_loras or civitai_vaes) and not civitai_valid:
+        downloader.log("⚠️ CivitAI downloads requested but token validation failed")
+
     # Prepare FS
     downloader.create_directory_structure()
 
-    # Execute
-    hf_ok, hf_fail = downloader.download_hf_repos(hf_repos, hf_token)
-    ck_ok, ck_fail = downloader.process_civitai_downloads(civitai_checkpoints, "checkpoints", civitai_token)
-    lr_ok, lr_fail = downloader.process_civitai_downloads(civitai_loras, "loras", civitai_token)
-    va_ok, va_fail = downloader.process_civitai_downloads(civitai_vaes, "vae", civitai_token)
+    # Execute downloads with better error tracking
+    total_downloads = 0
+    total_failures = 0
+    
+    # HuggingFace downloads
+    if hf_repos and hf_valid:
+        hf_ok, hf_fail = downloader.download_hf_repos(hf_repos, hf_token)
+        total_downloads += (hf_ok + hf_fail)
+        total_failures += hf_fail
+    elif hf_repos:
+        downloader.log("Skipping HuggingFace downloads due to token validation failure")
+        total_failures += len([repo.strip() for repo in hf_repos.split(",") if repo.strip()])
+    
+    # CivitAI downloads
+    if civitai_valid or not civitai_token:  # Allow no token for public models
+        ck_ok, ck_fail = downloader.process_civitai_downloads(civitai_checkpoints, "checkpoints", civitai_token)
+        lr_ok, lr_fail = downloader.process_civitai_downloads(civitai_loras, "loras", civitai_token)
+        va_ok, va_fail = downloader.process_civitai_downloads(civitai_vaes, "vae", civitai_token)
+        
+        total_downloads += (ck_ok + ck_fail + lr_ok + lr_fail + va_ok + va_fail)
+        total_failures += (ck_fail + lr_fail + va_fail)
+    else:
+        downloader.log("Skipping CivitAI downloads due to token validation failure")
+        # Count failures for skipped downloads
+        for downloads in [civitai_checkpoints, civitai_loras, civitai_vaes]:
+            if downloads:
+                total_failures += len([mid.strip() for mid in downloads.split(",") if mid.strip()])
 
-    downloader.log("All downloads complete.")
+    downloader.log(f"All downloads complete. Total: {total_downloads}, Failures: {total_failures}")
 
     # Debug summary (filesystem)
     if debug_mode:
@@ -409,9 +551,13 @@ def main() -> int:
             downloader.log(f"Error generating summary: {e}", is_debug=True)
         downloader.log("=== END SUMMARY ===", is_debug=True)
 
-    # Exit code: non-zero if any failures
-    total_fail = hf_fail + ck_fail + lr_fail + va_fail
-    return 0 if total_fail == 0 else 2
+    # Exit code: 0 if no failures, 2 if some failures, 1 if critical error
+    if total_failures == 0:
+        return 0
+    elif total_failures < total_downloads:  # Some successes
+        return 2  # Partial failure
+    else:
+        return 1  # Complete failure
 
 
 if __name__ == "__main__":
