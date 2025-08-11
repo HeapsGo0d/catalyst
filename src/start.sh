@@ -1,10 +1,10 @@
 #!/bin/bash
 # ==================================================================================
-# CATALYST STARTUP (RunPod / ComfyUI)
-# - Enhanced network readiness checks
-# - Safe Python/ComfyUI probe (no GPU requirement)
-# - Auto CPU fallback when CUDA not available
-# - Proper timing for downloads
+# CATALYST STARTUP (RunPod / ComfyUI) — quiet edition
+# - Network readiness checks
+# - Safe Python probe (no GPU touch)
+# - Auto CPU fallback when no CUDA
+# - Timed downloads
 # ==================================================================================
 
 set -Eeuo pipefail
@@ -21,20 +21,23 @@ DOWNLOADS_TMP="/home/comfyuser/workspace/downloads_tmp"
 # Prefer the container venv everywhere
 export PATH="/opt/venv/bin:${PATH}"
 export PYTHONNOUSERSITE=1
-
+# Hugging Face cache to writable location
+export HF_HOME="/home/comfyuser/workspace/downloads_tmp/huggingface/.hf"
 # Default secret location if not provided at runtime
 : "${SECURITY_TOKEN_VAULT_PATH:=/run/secrets/token}"
 
-# --- Logging ---
+# --- Logging (quiet by default; set LOG_LEVEL=debug for more) ---
+: "${LOG_LEVEL:=info}"
 log()       { echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} $*"; }
+log_debug() { [ "${LOG_LEVEL}" = "debug" ] && log "[debug] $*"; }
 log_error() { echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} [ERROR] $*" | tee -a "${STARTUP_ERROR_LOG}"; }
 
 # --- Signal Handling for Graceful Shutdown ---
 term_handler() {
-  log "SIGTERM received. Shutting down services gracefully..."
+  log "SIGTERM received. Shutting down…"
   jobs -p | xargs -r kill || true
   wait || true
-  log "All services have been shut down."
+  log "Services stopped."
   exit 0
 }
 trap 'kill ${!} 2>/dev/null || true; term_handler' SIGTERM
@@ -42,69 +45,42 @@ trap 'kill ${!} 2>/dev/null || true; term_handler' SIGTERM
 # --- Wait Helpers ---
 wait_for_path() {
   local path="$1"; local timeout="${2:-30}"; local counter=0
-  log "Waiting for path: $path"
-  while [ ! -e "$path" ] && [ $counter -lt $timeout ]; do
-    sleep 1; counter=$((counter + 1))
-  done
-  if [ ! -e "$path" ]; then log_error "Timeout waiting for path: $path"; return 1; fi
-  log "Path ready: $path"; return 0
+  while [ ! -e "$path" ] && [ $counter -lt $timeout ]; do sleep 1; counter=$((counter + 1)); done
+  [ -e "$path" ] || { log_error "Timeout waiting for path: $path"; return 1; }
+  return 0
 }
 
 # --- Network Readiness Check ---
 wait_for_network_ready() {
-  local timeout="${1:-90}"  # Increased timeout for container startup
-  local max_attempts=$((timeout / 3))
-  local attempt=0
-  
-  log "Checking network connectivity (timeout: ${timeout}s)..."
-  
+  local timeout="${1:-90}" max_attempts=$((timeout / 3)) attempt=0
+  log "Checking network… (timeout ${timeout}s)"
   while [ $attempt -lt $max_attempts ]; do
     local all_ready=true
-    
-    # Test basic connectivity first
-    if ! curl -s --connect-timeout 5 --max-time 10 "https://8.8.8.8" >/dev/null 2>&1; then
-      all_ready=false
-    # Test DNS resolution
-    elif ! curl -s --connect-timeout 5 --max-time 10 "https://google.com" >/dev/null 2>&1; then
-      all_ready=false
-    # Test specific services
-    elif ! curl -s --connect-timeout 5 --max-time 10 "https://civitai.com" >/dev/null 2>&1; then
-      all_ready=false
-    elif ! curl -s --connect-timeout 5 --max-time 10 "https://huggingface.co" >/dev/null 2>&1; then
-      all_ready=false
-    fi
-    
-    if [ "$all_ready" = true ]; then
-      log "✅ Network connectivity confirmed"
-      return 0
-    fi
-    
-    attempt=$((attempt + 1))
-    log "Network not ready, attempt $attempt/$max_attempts (waiting 3s)..."
-    sleep 3
+    curl -s --connect-timeout 5 --max-time 10 "https://8.8.8.8" >/dev/null 2>&1 || all_ready=false
+    $all_ready && curl -s --connect-timeout 5 --max-time 10 "https://google.com" >/dev/null 2>&1 || all_ready=false
+    $all_ready && curl -s --connect-timeout 5 --max-time 10 "https://civitai.com" >/dev/null 2>&1 || all_ready=false
+    $all_ready && curl -s --connect-timeout 5 --max-time 10 "https://huggingface.co" >/dev/null 2>&1 || all_ready=false
+    if $all_ready; then log "Network OK"; return 0; fi
+    attempt=$((attempt + 1)); sleep 3
   done
-  
-  log_error "Network connectivity check failed after $max_attempts attempts"
+  log_error "Network check failed"
   return 1
 }
 
-# --- Safe Python/ComfyUI probe (non-fatal; no import of main.py) ---
+# --- Safe Python/ComfyUI probe (no GPU-touching imports) ---
 python_env_probe() {
-  log "Running Python/ComfyUI probe..."
+  log_debug "Probing Python/ComfyUI…"
   "${PYTHON_EXEC}" - <<'PY' || true
 import sys, importlib, platform
-print("Executable:", sys.executable)
 print("Python:", platform.python_version())
 try:
     import torch
     print("Torch:", getattr(torch, "__version__", "unknown"))
-    print("CUDA available:", torch.cuda.is_available())
 except Exception as e:
     print("Torch probe failed:", e)
-
-# Probe lightweight ComfyUI modules only (avoid main.py which may touch CUDA)
+# Only safe ComfyUI modules to avoid CUDA noise
 sys.path.insert(0, "/home/comfyuser/workspace/ComfyUI")
-for m in ("folder_paths", "execution", "utils"):
+for m in ("folder_paths", "utils"):
     try:
         importlib.import_module(m)
         print(f"Imported {m} OK")
@@ -115,209 +91,97 @@ PY
 
 # --- Strict core check (Python + Torch only) ---
 check_python_core() {
-  log "Verifying Python + Torch..."
-  if [ ! -x "${PYTHON_EXEC}" ]; then
-    log_error "Python executable not found or not executable at ${PYTHON_EXEC}"
-    return 1
-  fi
+  if [ ! -x "${PYTHON_EXEC}" ]; then log_error "Python not found at ${PYTHON_EXEC}"; return 1; fi
   "${PYTHON_EXEC}" - <<'PY'
 import torch, sys
 print(sys.executable)
 print("torch:", getattr(torch, "__version__", "unknown"))
-# do not require CUDA=True; just ensure torch imports
 PY
 }
 
-# --- Decide ComfyUI flags based on GPU presence ---
+# --- Decide ComfyUI flags based on GPU presence (pure; no logging) ---
 decide_comfyui_flags() {
-  local flags="${COMFYUI_FLAGS:-}"
-  local has_cuda
-  
-  # Check CUDA availability without logging inside command substitution
+  local flags="${COMFYUI_FLAGS:-}" has_cuda
   has_cuda="$("${PYTHON_EXEC}" -c "import torch, sys; sys.stdout.write('1' if torch.cuda.is_available() else '0')" 2>/dev/null || echo "0")"
-  
-  if [ "$has_cuda" = "0" ]; then
-    log "No CUDA detected; forcing CPU mode (--cpu)."
-    flags="$flags --cpu"
-  else
-    log "CUDA detected; running with GPU."
-  fi
-  
-  # Return the flags (don't echo log messages here!)
+  [ "$has_cuda" = "0" ] && flags="$flags --cpu"
   echo "$flags"
 }
 
 # --- PHASE 1: File System Setup ---
 setup_filesystem() {
-  log "=== PHASE 1: File System Setup ==="
+  log "Preparing filesystem…"
   local dirs=(
-    "${MODELS_DIR}/checkpoints"
-    "${MODELS_DIR}/loras"
-    "${MODELS_DIR}/vae"
-    "${MODELS_DIR}/diffusers"
-    "${DOWNLOADS_TMP}/checkpoints"
-    "${DOWNLOADS_TMP}/loras"
-    "${DOWNLOADS_TMP}/vae"
-    "${DOWNLOADS_TMP}/huggingface"
-    "/home/comfyuser/workspace/input"
-    "/home/comfyuser/workspace/output"
-    "/home/comfyuser/workspace/debug"
+    "${MODELS_DIR}/checkpoints" "${MODELS_DIR}/loras" "${MODELS_DIR}/vae" "${MODELS_DIR}/diffusers"
+    "${DOWNLOADS_TMP}/checkpoints" "${DOWNLOADS_TMP}/loras" "${DOWNLOADS_TMP}/vae"
+    "${DOWNLOADS_TMP}/huggingface" "${DOWNLOADS_TMP}/huggingface/.hf"
+    "/home/comfyuser/workspace/input" "/home/comfyuser/workspace/output" "/home/comfyuser/workspace/debug"
   )
-  for d in "${dirs[@]}"; do
-    mkdir -p "$d" || { log_error "Failed to create directory: $d"; return 1; }
-    log "Ensured directory: $d"
-  done
-  
-  # Fix ownership check - don't fail if we can't chown (common in containers)
-  if chown -R comfyuser:comfyuser /home/comfyuser/workspace/ 2>/dev/null; then
-    log "Set ownership on workspace directories"
-  else
-    log "Non-root; skipping workspace chown (likely bind-mounted/readonly)."
-  fi
-  
+  mkdir -p "${dirs[@]}" || { log_error "Failed to create workspace dirs"; return 1; }
+  chown -R comfyuser:comfyuser /home/comfyuser/workspace/ 2>/dev/null || true
   touch "${MODELS_DIR}/.catalyst_models" "${DOWNLOADS_TMP}/.catalyst_downloads" || true
-  log "✅ File system setup completed"
+  log "Filesystem ready"
   return 0
 }
 
 # --- PHASE 2: Security Initialization ---
 security_init() {
-  log "=== PHASE 2: Security Initialization ==="
-  if [ -f "${SCRIPTS_DIR}/network_security.sh" ]; then
-    bash "${SCRIPTS_DIR}/network_security.sh" || log "network_security.sh returned nonzero (continuing)"
-  else
-    log "Warning: network_security.sh not found, skipping…"
-  fi
+  [ -f "${SCRIPTS_DIR}/network_security.sh" ] && bash "${SCRIPTS_DIR}/network_security.sh" || true
   return 0
 }
 
 # --- PHASE 3: Model Downloads ---
 execute_downloads() {
-  log "=== PHASE 3: Model Downloads ==="
-  
-  # Check for download configuration
+  log "Download phase…"
   local has_downloads=false
   [ -n "${HF_REPOS_TO_DOWNLOAD:-}" ] && has_downloads=true
   [ -n "${CIVITAI_CHECKPOINTS_TO_DOWNLOAD:-}" ] && has_downloads=true
   [ -n "${CIVITAI_LORAS_TO_DOWNLOAD:-}" ] && has_downloads=true
   [ -n "${CIVITAI_VAES_TO_DOWNLOAD:-}" ] && has_downloads=true
-  
-  if [ "${has_downloads}" = false ]; then
-    log "No downloads configured, skipping download phase"
-    return 0
-  fi
-  
-  # *** CRITICAL: Wait for network readiness ***
-  if ! wait_for_network_ready 90; then
-    log_error "Network not ready for downloads"
-    log "Continuing with container startup without downloads..."
-    return 1
-  fi
-  
-  # Check required files and tools
-  if [ ! -f "${SCRIPTS_DIR}/nexis_downloader.py" ]; then
-    log_error "Download manager not found: ${SCRIPTS_DIR}/nexis_downloader.py"
-    return 1
-  fi
-  
-  if ! wait_for_path "${PYTHON_EXEC}" 10 || ! check_python_core; then
-    log_error "Python core check failed"
-    return 1
-  fi
-  
-  # Show environment probe (non-fatal)
-  python_env_probe || true
-  
-  # *** ENHANCED: Token validation before downloads ***
-  log "Validating API tokens..."
-  local token_issues=0
-  
-  if [ -n "${HF_REPOS_TO_DOWNLOAD:-}" ] && [ -z "${HUGGINGFACE_TOKEN:-}" ]; then
-    log "⚠️ HuggingFace repos configured but no HUGGINGFACE_TOKEN provided"
-    log "   This may fail for private/gated repositories like FLUX.1-dev"
-    ((token_issues++))
-  fi
-  
-  if [ -n "${CIVITAI_CHECKPOINTS_TO_DOWNLOAD:-}${CIVITAI_LORAS_TO_DOWNLOAD:-}${CIVITAI_VAES_TO_DOWNLOAD:-}" ] && [ -z "${CIVITAI_TOKEN:-}" ]; then
-    log "⚠️ CivitAI models configured but no CIVITAI_TOKEN provided"
-    log "   This may fail for private models or hit rate limits"
-    ((token_issues++))
-  fi
-  
-  if [ $token_issues -gt 0 ]; then
-    log "Found $token_issues potential token issues. Continuing anyway..."
-  fi
+  $has_downloads || { log "No downloads configured"; return 0; }
 
-  log "Starting download manager…"
-  local download_timeout="${DOWNLOAD_TIMEOUT:-3600}"
-  
-  # Run downloads with timeout and proper error handling
-  local download_exit_code=0
+  wait_for_network_ready 90 || { log_error "Network not ready for downloads (continuing)"; return 1; }
+  [ -f "${SCRIPTS_DIR}/nexis_downloader.py" ] || { log_error "Downloader missing: ${SCRIPTS_DIR}/nexis_downloader.py"; return 1; }
+  wait_for_path "${PYTHON_EXEC}" 10 && check_python_core || { log_error "Python core check failed"; return 1; }
+
+  python_env_probe || true
+
+  # Brief token sanity (info only)
+  [ -n "${HF_REPOS_TO_DOWNLOAD:-}" ] && [ -z "${HUGGINGFACE_TOKEN:-}" ] && log "HF repos set; no HUGGINGFACE_TOKEN (private/gated may fail)"
+  [ -n "${CIVITAI_CHECKPOINTS_TO_DOWNLOAD:-}${CIVITAI_LORAS_TO_DOWNLOAD:-}${CIVITAI_VAES_TO_DOWNLOAD:-}" ] && [ -z "${CIVITAI_TOKEN:-}" ] && log "CivitAI models set; no CIVITAI_TOKEN (private/rate limits possible)"
+
+  log "Starting downloads…"
+  local download_timeout="${DOWNLOAD_TIMEOUT:-3600}" download_exit_code=0
   if timeout "${download_timeout}" "${PYTHON_EXEC}" "${SCRIPTS_DIR}/nexis_downloader.py"; then
-    log "✅ Downloads completed successfully"
+    log "Downloads finished"
   else
     download_exit_code=$?
-    if [ $download_exit_code -eq 124 ]; then
-      log_error "Downloads timed out after ${download_timeout}s"
-    elif [ $download_exit_code -eq 2 ]; then
-      log "Downloads completed with some failures"
-    else
-      log "Downloads exited with code: $download_exit_code"
-    fi
-    log "Continuing with startup anyway…"
+    case $download_exit_code in
+      124) log_error "Downloads timed out (${download_timeout}s)";;
+      2)   log "Downloads finished with some failures";;
+      *)   log "Downloads exited with code ${download_exit_code}";;
+    esac
   fi
 
-  # Report download results
   if [ -d "$DOWNLOADS_TMP" ]; then
-    local file_count
-    file_count=$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)
-    log "Found $file_count downloaded files in temporary directory"
-    
-    if [ "$file_count" -gt 0 ]; then
-      log "Downloads appear to have succeeded despite any errors"
-    else
-      log "No files downloaded - check logs for issues"
-    fi
-  else
-    log "No downloads directory found - downloads may have failed completely"
+    local file_count; file_count=$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)
+    log "Downloaded files in temp: $file_count"
   fi
-  
   return 0
 }
 
 # --- PHASE 4: File Organization ---
 organize_files() {
-  log "=== PHASE 4: File Organization ==="
-  if [ ! -d "$DOWNLOADS_TMP" ]; then
-    log "No downloads to organize, skipping"
-    return 0
-  fi
-  local file_count
-  file_count=$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)
-  if [ "$file_count" -eq 0 ]; then
-    log "No files to organize, skipping"
-    return 0
-  fi
-  log "Organizing $file_count downloaded files…"
-  if [ ! -f "${SCRIPTS_DIR}/file_organizer.sh" ]; then
-    log_error "File organizer not found: ${SCRIPTS_DIR}/file_organizer.sh"
-    return 1
-  fi
+  [ -d "$DOWNLOADS_TMP" ] || { log "No downloads dir"; return 0; }
+  local file_count; file_count=$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)
+  [ "$file_count" -gt 0 ] || { log "No files to organize"; return 0; }
+
+  [ -f "${SCRIPTS_DIR}/file_organizer.sh" ] || { log_error "Organizer missing: ${SCRIPTS_DIR}/file_organizer.sh"; return 1; }
   if bash "${SCRIPTS_DIR}/file_organizer.sh"; then
-    log "✅ File organization completed successfully"
-    local organized_files
-    organized_files=$(find "$MODELS_DIR" -type f 2>/dev/null | wc -l || echo 0)
-    log "Total files in models directory: $organized_files"
-    if [ -d "$DOWNLOADS_TMP" ]; then
-      find "$DOWNLOADS_TMP" -type d -empty -delete 2>/dev/null || true
-      if [ -d "$DOWNLOADS_TMP" ] && [ "$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)" -eq 0 ]; then
-        log "Removing empty downloads directory"
-        rm -rf "$DOWNLOADS_TMP" || true
-      fi
-    fi
+    log "Files organized"
+    find "$DOWNLOADS_TMP" -type d -empty -delete 2>/dev/null || true
+    [ -d "$DOWNLOADS_TMP" ] && [ "$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)" -eq 0 ] && rm -rf "$DOWNLOADS_TMP" || true
   else
-    log_error "File organization failed - files may still be in downloads_tmp"
-    log "Check /home/comfyuser/workspace/debug/ for preserved files"
+    log_error "Organization failed (files may remain in downloads_tmp)"
     return 1
   fi
   return 0
@@ -325,54 +189,32 @@ organize_files() {
 
 # --- PHASE 5: Service Startup (main process) ---
 start_services() {
-  log "=== PHASE 5: Service Startup ==="
+  log "Starting services…"
   cd "${COMFYUI_DIR}" || { log_error "Cannot access ComfyUI dir: ${COMFYUI_DIR}"; return 1; }
 
-  # Non-fatal probe (prints diagnostics but avoids importing main.py)
   python_env_probe || true
 
-  # Get ComfyUI flags - FIXED: proper variable assignment
-  local comfyui_flags
-  comfyui_flags="$(decide_comfyui_flags)"
-  
-  log "Starting ComfyUI server with flags: ${comfyui_flags}"
-  log "Launching ComfyUI…"
-  
-  # Execute ComfyUI with proper flag handling
+  local comfyui_flags; comfyui_flags="$(decide_comfyui_flags 2>/dev/null)"; [ -n "$comfyui_flags" ] || comfyui_flags=""
+  if [[ "$comfyui_flags" == *"--cpu"* ]]; then log "Running ComfyUI in CPU mode"; else log "Running ComfyUI with CUDA"; fi
+
   exec "${PYTHON_EXEC}" main.py --listen 0.0.0.0 --port 8188 ${comfyui_flags}
 }
 
 # --- Main ---
 main() {
-  log "🚀 Initializing Catalyst container startup sequence…"
-  if ! setup_filesystem; then
-    log_error "File system setup failed, aborting startup"
-    exit 1
-  fi
-  security_init || log "Security init returned nonzero (continuing)"
-  if ! execute_downloads; then
-    log_error "Download phase failed, but continuing with startup…"
-  fi
-  if ! organize_files; then
-    log_error "File organization failed, but continuing with startup…"
-  fi
+  log "Init…"
+  setup_filesystem     || { log_error "FS setup failed"; exit 1; }
+  security_init        || true
+  execute_downloads    || log_debug "Download phase returned nonzero"
+  organize_files       || log_debug "Organization phase returned nonzero"
   start_services
 }
 
 # --- Pre-start Validation ---
-log "Performing pre-startup validation…"
-if [ ! -d "${COMFYUI_DIR}" ]; then
-  log_error "ComfyUI directory not found at ${COMFYUI_DIR}. Aborting."
-  exit 1
-fi
-if [ ! -f "${PYTHON_EXEC}" ]; then
-  log_error "Python executable not found at ${PYTHON_EXEC}. Aborting."
-  exit 1
-fi
-if [ ! -d "${SCRIPTS_DIR}" ]; then
-  log_error "Scripts directory not found at ${SCRIPTS_DIR}. Aborting."
-  exit 1
-fi
+log "Pre-start validation…"
+[ -d "${COMFYUI_DIR}" ] || { log_error "ComfyUI dir missing: ${COMFYUI_DIR}"; exit 1; }
+[ -f "${PYTHON_EXEC}" ] || { log_error "Python missing: ${PYTHON_EXEC}"; exit 1; }
+[ -d "${SCRIPTS_DIR}" ] || { log_error "Scripts dir missing: ${SCRIPTS_DIR}"; exit 1; }
 
-log "✅ Pre-startup validation passed"
+log "Validation OK"
 main
