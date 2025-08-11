@@ -1,3 +1,4 @@
+# ─────────────────────────────
 # Documentation
 *.md
 docs/
@@ -27,6 +28,7 @@ dist/
 __pycache__/
 *.pyc
 *.pyo
+*.a
 
 # Test files
 tests/
@@ -37,3 +39,12 @@ tests/
 secrets/
 *.pem
 *.key
+
+# ─────────────────────────────
+# Large / cache-heavy folders (ComfyUI + RunPod-specific)
+node_modules
+models
+checkpoints
+downloads_tmp
+workspace/*
+!workspace/.keep
