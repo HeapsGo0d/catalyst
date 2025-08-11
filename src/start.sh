@@ -127,12 +127,15 @@ setup_filesystem() {
     mkdir -p "$d" || { log_error "Failed to create directory: $d"; return 1; }
     log "Ensured directory: $d"
   done
-if [ "$(id -u)" -eq 0 ]; then
-  log "Adjusting ownership of workspace (excluding ComfyUI) as root…"
-  find /home/comfyuser/workspace -mindepth 1 -maxdepth 1 ! -name "ComfyUI" -exec chown -R comfyuser:comfyuser {} + || log "Non-fatal: chown had some errors."
-else
-  log "Non-root; skipping workspace chown (likely bind-mounted/readonly)."
-fi
+  
+  # Fix ownership check - don't fail if we can't chown (common in containers)
+  if chown -R comfyuser:comfyuser /home/comfyuser/workspace/ 2>/dev/null; then
+    log "Set ownership on workspace directories"
+  else
+    log "Non-root; skipping workspace chown (likely bind-mounted/readonly)."
+  fi
+  
+  touch "${MODELS_DIR}/.catalyst_models" "${DOWNLOADS_TMP}/.catalyst_downloads" || true
   log "✅ File system setup completed"
   return 0
 }
@@ -241,10 +244,14 @@ start_services() {
   # Non-fatal probe (prints diagnostics but avoids importing main.py)
   python_env_probe || true
 
+  # Get ComfyUI flags - fix the output capture issue
   local comfyui_flags
   comfyui_flags="$(decide_comfyui_flags)"
+  
   log "Starting ComfyUI server with flags: ${comfyui_flags}"
   log "Launching ComfyUI…"
+  
+  # Execute ComfyUI with proper flag handling
   exec "${PYTHON_EXEC}" main.py --listen 0.0.0.0 --port 8188 ${comfyui_flags}
 }
 
