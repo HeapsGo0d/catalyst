@@ -127,9 +127,12 @@ setup_filesystem() {
     mkdir -p "$d" || { log_error "Failed to create directory: $d"; return 1; }
     log "Ensured directory: $d"
   done
-  chown -R comfyuser:comfyuser /home/comfyuser/workspace/ || {
-    log_error "Failed to set ownership on /home/comfyuser/workspace"; return 1; }
-  touch "${MODELS_DIR}/.catalyst_models" "${DOWNLOADS_TMP}/.catalyst_downloads" || true
+if [ "$(id -u)" -eq 0 ]; then
+  log "Adjusting ownership of workspace (excluding ComfyUI) as root…"
+  find /home/comfyuser/workspace -mindepth 1 -maxdepth 1 ! -name "ComfyUI" -exec chown -R comfyuser:comfyuser {} + || log "Non-fatal: chown had some errors."
+else
+  log "Non-root; skipping workspace chown (likely bind-mounted/readonly)."
+fi
   log "✅ File system setup completed"
   return 0
 }
