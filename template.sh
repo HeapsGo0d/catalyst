@@ -8,7 +8,7 @@ set -euo pipefail
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 # ⚠️ IMPORTANT: Update this to your Docker Hub username and image name.
-readonly IMAGE_NAME="heapsgo0d/catalyst:v1.0.5"
+readonly IMAGE_NAME="heapsgo0d/catalyst:v1.0.6"
 readonly TEMPLATE_NAME="ComfyUI FLUX - Project Catalyst"
 readonly CUSTOM_DNS_SERVERS="${CUSTOM_DNS_SERVERS:-"8.8.8.8,1.1.1.1"}" # Default to Google and Cloudflare
 
@@ -127,7 +127,7 @@ PAYLOAD=$(jq -n \
         "readme": $readme,
         "env": [
           { "key": "DEBUG_MODE", "value": "false" },
-          { "key": "COMFYUI_FLAGS", "value": "--bf16-unet --highvram" },
+          { "key": "COMFYUI_FLAGS", "value": "--bf16-unet" },
           { "key": "FB_USERNAME", "value": "admin" },
           { "key": "FB_PASSWORD", "value": "{{ RUNPOD_SECRET_FILEBROWSER_PASSWORD }}" },
           { "key": "HUGGINGFACE_TOKEN", "value": "{{ RUNPOD_SECRET_huggingface.co }}" },
