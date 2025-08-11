@@ -8,11 +8,11 @@ set -euo pipefail
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 # ⚠️ IMPORTANT: Update this to your Docker Hub username and image name.
-readonly IMAGE_NAME="heapsgo0d/catalyst:v1.0.0"
+readonly IMAGE_NAME="heapsgo0d/catalyst:v1.0.1"
 readonly TEMPLATE_NAME="ComfyUI FLUX - Project Catalyst"
 readonly CUSTOM_DNS_SERVERS="${CUSTOM_DNS_SERVERS:-"8.8.8.8,1.1.1.1"}" # Default to Google and Cloudflare
 
-# ─── Docker Arguments Construction ─────────────────────────────────
+# ─── Docker Arguments Construction ─────────────────────────────────────
 # Build the docker arguments string with required capabilities for GPU/network
 docker_args="--security-opt=no-new-privileges"
 docker_args+=" --cap-drop=ALL"
@@ -53,7 +53,7 @@ This template provides a security-hardened, production-ready environment for Com
 
 ### 🖥️ Services & Ports:
 - **ComfyUI**: Port `8188`
-- **FileBrowser**: Port `8080` (if enabled)
+- **FileBrowser**: Port `8080` (reserved for future implementation)
 
 ### ⚙️ Environment Variables (See Template Options):
 - **Downloads**: `HF_REPOS_TO_DOWNLOAD`, `CIVITAI_CHECKPOINTS_TO_DOWNLOAD`, `CIVITAI_LORAS_TO_DOWNLOAD`, `CIVITAI_VAES_TO_DOWNLOAD`
@@ -68,10 +68,24 @@ This template provides a security-hardened, production-ready environment for Com
 - **Checksum Validation**: All downloads verified against official hashes to prevent tampering
 
 ### 🧰 Technical Specifications:
-- **Base Image**: `nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04`
+- **Base Image**: `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04`
 - **Python**: 3.11 with optimized virtual environment
 - **Default Temp Storage**: 200 GB container, 100 GB volume
 - **Security**: Non-root execution, capability dropping, privilege escalation prevention
+
+### 🚀 Quick Start:
+1. Deploy the template
+2. Configure your API tokens in RunPod Secrets (optional but recommended)
+3. Set download lists in environment variables
+4. Access ComfyUI at port 8188
+5. Monitor downloads with DEBUG_MODE=true for first run
+
+### 📝 Model Configuration Examples:
+- **HF_REPOS_TO_DOWNLOAD**: `"black-forest-labs/FLUX.1-dev,black-forest-labs/FLUX.1-schnell"`
+- **CIVITAI_CHECKPOINTS_TO_DOWNLOAD**: `"1569593,919063,450105"`
+- **CIVITAI_LORAS_TO_DOWNLOAD**: `"182404,445135,871108"`
+
+For advanced security configurations and forensic cleanup options, see the environment variables documentation.
 EOF
 )
 
@@ -93,10 +107,10 @@ PAYLOAD=$(jq -n \
   --arg name "$TEMPLATE_NAME" \
   --arg imageName "$IMAGE_NAME" \
   --argjson cDisk 200 \
-  --argjson vGb 100 \
+  --argjson vGb 0 \
   --arg vPath "/runpod-volume" \
   --arg dArgs "$docker_args" \
-  --arg ports "8188/http" \
+  --arg ports "8188/http,8080/http" \
   --arg readme "$README_CONTENT" \
   --arg query "$GRAPHQL_QUERY" \
   '{
@@ -147,6 +161,7 @@ PAYLOAD=$(jq -n \
 echo "🚀 Sending request to create/update RunPod template..."
 echo "   Template Name: $TEMPLATE_NAME"
 echo "   Docker Image:  $IMAGE_NAME"
+echo "   Ports:         8188/http, 8080/http"
 
 response=$(curl -s -w "\n%{http_code}" \
   -X POST "https://api.runpod.io/graphql" \
@@ -174,4 +189,13 @@ fi
 
 echo "✅ Template '$TEMPLATE_NAME' created/updated successfully!"
 echo "   ID: $template_id"
-echo "🎉 You can now find your template in the RunPod console."
+echo ""
+echo "🎯 Next Steps:"
+echo "   1. Visit RunPod Console: https://runpod.io/console/deploy"
+echo "   2. Select 'ComfyUI FLUX - Project Catalyst' template"
+echo "   3. Configure GPU and deploy"
+echo "   4. Access ComfyUI at port 8188"
+echo "   5. Port 8080 reserved for future FileBrowser implementation"
+echo ""
+echo "🛡️ Security Note: FileBrowser placeholder configured but not yet implemented."
+echo "   This maintains consistency with your previous template structure."
