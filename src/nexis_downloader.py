@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Nexis Download Manager - Python Implementation
-- Robust network timing
-- Proper CivitAI API usage
-- One-hop redirect resolution (drop auth on presigned R2 URLs)
-- Gentler retry/backoff and clear diagnostics
+Nexis Download Manager - Python Implementation (Idempotent Version)
+- Checks final destinations before downloading
+- Creates completion markers to prevent re-downloads on restart
+- Direct downloads to final locations where possible
 """
 
 from __future__ import annotations
@@ -27,8 +26,13 @@ class NexisDownloader:
     def __init__(self, debug_mode: bool = False):
         self.debug_mode = debug_mode
         self.download_tmp_dir = Path("/home/comfyuser/workspace/downloads_tmp")
+        self.models_dir = Path("/home/comfyuser/workspace/models")
         self.download_tmp_dir.mkdir(exist_ok=True)
+        self.models_dir.mkdir(exist_ok=True)
         self.session = self._create_session()
+        
+        # Completion marker file
+        self.completion_marker = self.download_tmp_dir / ".catalyst_downloads_complete"
 
     # ---------- infra ----------
 
@@ -36,8 +40,8 @@ class NexisDownloader:
         """Create a requests session with retry logic."""
         session = requests.Session()
         retry_strategy = Retry(
-            total=3,                     # gentler than 5
-            backoff_factor=2,            # exponential backoff
+            total=3,
+            backoff_factor=2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=frozenset({"HEAD", "GET", "OPTIONS"}),
             respect_retry_after_header=True,
@@ -63,13 +67,28 @@ class NexisDownloader:
         prefix = "[DOWNLOAD-DEBUG]" if is_debug else "[DOWNLOAD]"
         print(f"  {prefix} {message}")
 
+    def check_completion_marker(self) -> bool:
+        """Check if downloads were already completed in a previous run."""
+        if self.completion_marker.exists():
+            self.log("✅ Found completion marker - downloads already finished")
+            return True
+        return False
+
+    def create_completion_marker(self) -> None:
+        """Create completion marker to indicate successful download completion."""
+        try:
+            self.completion_marker.write_text(f"Downloads completed at {time.ctime()}\n")
+            self.log("Created completion marker", is_debug=True)
+        except Exception as e:
+            self.log(f"Warning: Could not create completion marker: {e}")
+
     def wait_for_network_ready(self, timeout: int = 60) -> bool:
         """Wait for basic network connectivity."""
         self.log("Checking network readiness...")
         test_urls = [
-            "https://8.8.8.8",       # reachability
-            "https://civitai.com",   # CivitAI
-            "https://huggingface.co" # Hugging Face
+            "https://8.8.8.8",
+            "https://civitai.com",
+            "https://huggingface.co"
         ]
         start = time.time()
         while time.time() - start < timeout:
@@ -111,7 +130,6 @@ class NexisDownloader:
 
         if civitai_token:
             try:
-                # Public model version – just to validate the token endpoint path
                 r = self.session.get(
                     "https://civitai.com/api/v1/model-versions/128713",
                     headers={"Authorization": f"Bearer {civitai_token}"},
@@ -127,8 +145,16 @@ class NexisDownloader:
 
     # ---------- Hugging Face ----------
 
+    def _check_hf_repo_exists(self, repo_id: str) -> bool:
+        """Check if HF repo already exists in final location."""
+        final_dir = self.models_dir / "huggingface" / repo_id
+        if final_dir.exists() and any(final_dir.iterdir()):
+            self.log(f"✅ HF repo '{repo_id}' already exists in final location")
+            return True
+        return False
+
     def download_hf_repos(self, repos_list: str, token: Optional[str] = None) -> Tuple[int, int]:
-        """Download HuggingFace repositories using huggingface-cli."""
+        """Download HuggingFace repositories directly to final locations."""
         if not repos_list:
             self.log("No Hugging Face repos specified to download.")
             return (0, 0)
@@ -138,15 +164,23 @@ class NexisDownloader:
         self.log("Found Hugging Face repos to download...")
         repos = [r.strip() for r in repos_list.split(",") if r.strip()]
 
-        hf_dir = self.download_tmp_dir / "huggingface"
-        hf_dir.mkdir(exist_ok=True)
+        # Ensure HF models directory exists
+        hf_models_dir = self.models_dir / "huggingface"
+        hf_models_dir.mkdir(exist_ok=True)
 
-        ok, fail = 0, 0
+        ok, fail, skipped = 0, 0, 0
         for repo_id in repos:
+            # Check if already exists
+            if self._check_hf_repo_exists(repo_id):
+                skipped += 1
+                continue
+
             self.log(f"Starting HF download: {repo_id}")
+            final_dir = hf_models_dir / repo_id
+            
             cmd = [
                 "huggingface-cli", "download", repo_id,
-                "--local-dir", str(hf_dir / repo_id),
+                "--local-dir", str(final_dir),
                 "--local-dir-use-symlinks", "False",
                 "--resume-download",
             ]
@@ -173,9 +207,35 @@ class NexisDownloader:
                 self.log("   ⏭️ Continuing…")
                 fail += 1
 
+        if skipped > 0:
+            self.log(f"Skipped {skipped} already-downloaded HF repos")
+        
         return (ok, fail)
 
     # ---------- CivitAI ----------
+
+    def _check_civitai_model_exists(self, filename: str, model_type: str, expected_hash: str = "") -> bool:
+        """Check if CivitAI model already exists in final location."""
+        final_file = self.models_dir / model_type.lower() / filename
+        if not final_file.exists():
+            return False
+            
+        # If we have a hash, verify it
+        if expected_hash and expected_hash.strip():
+            if self._verify_checksum(final_file, expected_hash):
+                self.log(f"✅ {model_type} '{filename}' already exists and verified")
+                return True
+            else:
+                self.log(f"⚠️ {model_type} '{filename}' exists but checksum mismatch - will re-download")
+                try:
+                    final_file.unlink()
+                except Exception:
+                    pass
+                return False
+        else:
+            # No hash available, assume existing file is good
+            self.log(f"✅ {model_type} '{filename}' already exists (no checksum verification)")
+            return True
 
     def get_civitai_model_info(self, model_id: str, token: Optional[str] = None) -> Optional[dict]:
         """Get model file metadata from CivitAI."""
@@ -216,7 +276,7 @@ class NexisDownloader:
             return False
 
     def download_civitai_model(self, model_id: str, model_type: str, token: Optional[str] = None) -> bool:
-        """Download a single model from CivitAI with error handling and redirect resolution."""
+        """Download a single model from CivitAI directly to final location."""
         if not model_id:
             return True
         if not self._require_tools("aria2c", "sha256sum"):
@@ -224,7 +284,7 @@ class NexisDownloader:
 
         self.log(f"Processing Civitai model ID: {model_id}", is_debug=True)
 
-        # 1) metadata
+        # 1) Get metadata
         info = self.get_civitai_model_info(model_id, token)
         if not info or not info.get("filename"):
             self.log(f"❌ ERROR: Could not retrieve metadata for Civitai model ID {model_id}.")
@@ -237,7 +297,11 @@ class NexisDownloader:
         self.log(f"Filename: {filename}", is_debug=True)
         self.log(f"Download URL: {download_url}", is_debug=True)
 
-        # 2) resolve one-hop redirect to presigned R2 URL
+        # 2) Check if already exists
+        if self._check_civitai_model_exists(filename, model_type, remote_hash):
+            return True
+
+        # 3) Resolve one-hop redirect to presigned R2 URL
         headers_dict: Dict[str, str] = {}
         if token and token.strip():
             headers_dict["Authorization"] = f"Bearer {token.strip()}"
@@ -254,19 +318,15 @@ class NexisDownloader:
             self.log(f"Redirect resolution failed: {e}", is_debug=True)
             final_url = download_url
 
-        # 3) fs
-        model_dir = self.download_tmp_dir / model_type.lower()
+        # 4) Prepare final location
+        model_dir = self.models_dir / model_type.lower()
         model_dir.mkdir(exist_ok=True)
         output_file = model_dir / filename
-        if output_file.exists() and output_file.stat().st_size > 0:
-            self.log(f"ℹ️ Skipping download for '{filename}', file already exists.")
-            return True
 
         self.log(f"Starting Civitai download: {filename} ({model_type})")
 
-        # 4) build aria2c command
+        # 5) Build aria2c command
         headers = []
-        # Only attach Authorization when the URL is still civitai.com
         if self._host_is_civitai(final_url) and token and token.strip():
             headers.append(f"--header=Authorization: Bearer {token.strip()}")
             self.log("Using Authorization header for CivitAI", is_debug=True)
@@ -283,10 +343,10 @@ class NexisDownloader:
             f"--dir={model_dir}",
             f"--out={filename}",
             *headers,
-            final_url,  # use the resolved URL
+            final_url,
         ]
 
-        # 5) execute + verify
+        # 6) Execute + verify
         try:
             self.log(f"Executing: {' '.join(cmd[:-1])} <url>", is_debug=True)
             result = subprocess.run(cmd, check=True, capture_output=not self.debug_mode, text=True)
@@ -391,16 +451,22 @@ class NexisDownloader:
         return (successful, failed)
 
     def create_directory_structure(self) -> None:
-        """Create organized directory structure in downloads_tmp."""
-        for dir_name in ("checkpoints", "loras", "vae", "huggingface"):
-            dir_path = self.download_tmp_dir / dir_name
+        """Create organized directory structure."""
+        # Create final model directories
+        for dir_name in ("checkpoints", "loras", "vae"):
+            dir_path = self.models_dir / dir_name
             dir_path.mkdir(exist_ok=True)
             self.log(f"Ensured directory: {dir_path}", is_debug=True)
+        
+        # Create HF models directory
+        hf_dir = self.models_dir / "huggingface"
+        hf_dir.mkdir(exist_ok=True)
+        self.log(f"Ensured directory: {hf_dir}", is_debug=True)
 
 
 def main() -> int:
-    """Main download orchestration with enhanced error handling."""
-    # Env (global DEBUG_MODE)
+    """Main download orchestration with enhanced error handling and idempotency."""
+    # Environment variables
     debug_mode = os.getenv("DEBUG_MODE", "false").lower() == "true"
     hf_repos = os.getenv("HF_REPOS_TO_DOWNLOAD", "")
     hf_token = os.getenv("HUGGINGFACE_TOKEN", "")
@@ -409,9 +475,14 @@ def main() -> int:
     civitai_loras = os.getenv("CIVITAI_LORAS_TO_DOWNLOAD", "")
     civitai_vaes = os.getenv("CIVITAI_VAES_TO_DOWNLOAD", "")
 
-    # Init
+    # Initialize
     downloader = NexisDownloader(debug_mode=debug_mode)
     downloader.log("Initializing Nexis Python download manager...")
+
+    # Check if downloads were already completed
+    if downloader.check_completion_marker():
+        downloader.log("All downloads already completed in previous run - skipping")
+        return 0
 
     if debug_mode:
         downloader.log("Debug mode enabled - detailed progress on", is_debug=True)
@@ -419,6 +490,13 @@ def main() -> int:
         downloader.log(f"CIVITAI_CHECKPOINTS_TO_DOWNLOAD: {civitai_checkpoints or '<empty>'}", is_debug=True)
         downloader.log(f"CIVITAI_LORAS_TO_DOWNLOAD: {civitai_loras or '<empty>'}", is_debug=True)
         downloader.log(f"CIVITAI_VAES_TO_DOWNLOAD: {civitai_vaes or '<empty>'}", is_debug=True)
+
+    # Check if any downloads are configured
+    has_downloads = bool(hf_repos or civitai_checkpoints or civitai_loras or civitai_vaes)
+    if not has_downloads:
+        downloader.log("No downloads configured - creating completion marker and exiting")
+        downloader.create_completion_marker()
+        return 0
 
     # Network readiness
     if not downloader.wait_for_network_ready(timeout=60):
@@ -432,7 +510,7 @@ def main() -> int:
     if (civitai_checkpoints or civitai_loras or civitai_vaes) and not civitai_valid:
         downloader.log("⚠️ CivitAI downloads requested but token validation failed")
 
-    # Prepare FS
+    # Prepare filesystem
     downloader.create_directory_structure()
 
     # Execute downloads
@@ -464,10 +542,13 @@ def main() -> int:
 
     downloader.log(f"All downloads complete. Total: {total_downloads}, Failures: {total_failures}")
 
-    # Exit: 0 = all ok, 2 = partial, 1 = none
+    # Create completion marker on successful completion
     if total_failures == 0:
+        downloader.create_completion_marker()
         return 0
     elif total_failures < total_downloads:
+        # Partial success - still create marker to prevent full re-run
+        downloader.create_completion_marker()
         return 2
     else:
         return 1

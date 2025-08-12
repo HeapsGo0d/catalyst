@@ -1,10 +1,11 @@
 #!/bin/bash
 # ==================================================================================
-# CATALYST STARTUP (RunPod / ComfyUI) — quiet edition
+# CATALYST STARTUP (RunPod / ComfyUI) — quiet edition with idempotent downloads
 # - Network readiness checks
 # - Safe Python probe (no GPU touch)
 # - Auto CPU fallback when no CUDA
-# - Timed downloads
+# - Idempotent downloads (no re-download on restart)
+# - No file organization needed (downloads go directly to final locations)
 # ==================================================================================
 
 set -Eeuo pipefail
@@ -133,14 +134,34 @@ decide_comfyui_flags() {
 setup_filesystem() {
   log "Preparing filesystem…"
   local dirs=(
-    "${MODELS_DIR}/checkpoints" "${MODELS_DIR}/loras" "${MODELS_DIR}/vae" "${MODELS_DIR}/diffusers"
-    "${DOWNLOADS_TMP}/checkpoints" "${DOWNLOADS_TMP}/loras" "${DOWNLOADS_TMP}/vae"
-    "${DOWNLOADS_TMP}/huggingface" "${DOWNLOADS_TMP}/huggingface/.hf"
+    "${MODELS_DIR}/checkpoints" "${MODELS_DIR}/loras" "${MODELS_DIR}/vae" "${MODELS_DIR}/diffusers" "${MODELS_DIR}/huggingface"
+    "${DOWNLOADS_TMP}/huggingface/.hf"
     "/home/comfyuser/workspace/input" "/home/comfyuser/workspace/output" "/home/comfyuser/workspace/debug"
   )
   mkdir -p "${dirs[@]}" || { log_error "Failed to create workspace dirs"; return 1; }
   chown -R comfyuser:comfyuser /home/comfyuser/workspace/ 2>/dev/null || true
   touch "${MODELS_DIR}/.catalyst_models" "${DOWNLOADS_TMP}/.catalyst_downloads" || true
+  
+  # CRITICAL: Ensure ComfyUI directories exist and are writable (after volume mounts)
+  # This fixes the "Permission denied: '/home/comfyuser/workspace/ComfyUI/user'" crash
+  if [ -d "${COMFYUI_DIR}" ]; then
+    log_debug "Creating ComfyUI user directories post-mount..."
+    mkdir -p "${COMFYUI_DIR}/user/default/workflows" "${COMFYUI_DIR}/user/default/models" "${COMFYUI_DIR}/user/default/settings"
+    # Force ownership fix in case volume mount changed it to root
+    chown -R comfyuser:comfyuser "${COMFYUI_DIR}/user"
+    chmod -R u+rwX "${COMFYUI_DIR}/user"
+    
+    # Also ensure models directory has correct permissions
+    mkdir -p "${COMFYUI_DIR}/models/checkpoints" "${COMFYUI_DIR}/models/loras" "${COMFYUI_DIR}/models/vae" "${COMFYUI_DIR}/models/diffusers"
+    chown -R comfyuser:comfyuser "${COMFYUI_DIR}/models"
+    chmod -R u+rwX "${COMFYUI_DIR}/models"
+    
+    log_debug "ComfyUI directory permissions fixed"
+  else
+    log_error "ComfyUI directory not found: ${COMFYUI_DIR}"
+    return 1
+  fi
+  
   log "Filesystem ready"
   return 0
 }
@@ -151,7 +172,7 @@ security_init() {
   return 0
 }
 
-# --- PHASE 3: Model Downloads ---
+# --- PHASE 3: Model Downloads (Idempotent) ---
 execute_downloads() {
   log "Download phase…"
   local has_downloads=false
@@ -166,7 +187,6 @@ execute_downloads() {
   wait_for_path "${PYTHON_EXEC}" 10 && check_python_core || { log_error "Python core check failed"; return 1; }
 
   [[ "${DEBUG_MODE:-false}" == "true" ]] && python_env_probe || true
-
 
   # Brief token sanity (info only)
   [ -n "${HF_REPOS_TO_DOWNLOAD:-}" ] && [ -z "${HUGGINGFACE_TOKEN:-}" ] && log "HF repos set; no HUGGINGFACE_TOKEN (private/gated may fail)"
@@ -185,38 +205,24 @@ execute_downloads() {
     esac
   fi
 
-  if [ -d "$DOWNLOADS_TMP" ]; then
-    local file_count; file_count=$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)
-    log "Downloaded files in temp: $file_count"
+  # Show download summary
+  if [ -d "$MODELS_DIR" ]; then
+    local checkpoints; checkpoints=$(find "$MODELS_DIR/checkpoints" -type f 2>/dev/null | wc -l || echo 0)
+    local loras; loras=$(find "$MODELS_DIR/loras" -type f 2>/dev/null | wc -l || echo 0)
+    local vaes; vaes=$(find "$MODELS_DIR/vae" -type f 2>/dev/null | wc -l || echo 0)
+    local hf_models; hf_models=$(find "$MODELS_DIR/huggingface" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l || echo 0)
+    log "Model summary: $checkpoints checkpoints, $loras LoRAs, $vaes VAEs, $hf_models HF models"
   fi
+  
   return 0
 }
 
-# --- PHASE 4: File Organization ---
-organize_files() {
-  [ -d "$DOWNLOADS_TMP" ] || { log "No downloads dir"; return 0; }
-  local file_count; file_count=$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)
-  [ "$file_count" -gt 0 ] || { log "No files to organize"; return 0; }
-
-  [ -f "${SCRIPTS_DIR}/file_organizer.sh" ] || { log_error "Organizer missing: ${SCRIPTS_DIR}/file_organizer.sh"; return 1; }
-  if bash "${SCRIPTS_DIR}/file_organizer.sh"; then
-    log "Files organized"
-    find "$DOWNLOADS_TMP" -type d -empty -delete 2>/dev/null || true
-    [ -d "$DOWNLOADS_TMP" ] && [ "$(find "$DOWNLOADS_TMP" -type f 2>/dev/null | wc -l || echo 0)" -eq 0 ] && rm -rf "$DOWNLOADS_TMP" || true
-  else
-    log_error "Organization failed (files may remain in downloads_tmp)"
-    return 1
-  fi
-  return 0
-}
-
-# --- PHASE 5: Service Startup (main process) ---
+# --- PHASE 4: Service Startup (main process) ---
 start_services() {
   log "Starting services…"
   cd "${COMFYUI_DIR}" || { log_error "Cannot access ComfyUI dir: ${COMFYUI_DIR}"; return 1; }
 
   [[ "${DEBUG_MODE:-false}" == "true" ]] && python_env_probe || true
-
 
   local comfyui_flags; comfyui_flags="$(decide_comfyui_flags 2>/dev/null)"; [ -n "$comfyui_flags" ] || comfyui_flags=""
   if [[ "$comfyui_flags" == *"--cpu"* ]]; then log "Running ComfyUI in CPU mode"; else log "Running ComfyUI with CUDA"; fi
@@ -230,7 +236,7 @@ main() {
   setup_filesystem     || { log_error "FS setup failed"; exit 1; }
   security_init        || true
   execute_downloads    || log_debug "Download phase returned nonzero"
-  organize_files       || log_debug "Organization phase returned nonzero"
+  # NOTE: No file organization needed - downloads go directly to final locations
   start_services
 }
 

@@ -80,6 +80,16 @@ RUN --mount=type=cache,target=/home/comfyuser/.cache/pip \
     done && \
     ${PIP} install --no-cache-dir xformers --index-url "${XFORMERS_INDEX_URL}" || echo "xformers wheel not available; continuing"
 
+# FIX: Create ComfyUI user directory and set proper permissions to prevent restart crashes
+RUN cd /home/comfyuser/workspace/ComfyUI && \
+    mkdir -p user/default/workflows user/default/models user/default/settings && \
+    chown -R comfyuser:comfyuser user/ && \
+    chmod -R u+rwX user/ && \
+    # Also ensure models directory structure exists with proper permissions
+    mkdir -p models/checkpoints models/loras models/vae models/diffusers models/clip_vision models/controlnet && \
+    chown -R comfyuser:comfyuser models/ && \
+    chmod -R u+rwX models/
+
 # Copy ALL your scripts/configs (start.sh, file_organizer.sh, download_manager.sh, nexis_downloader.py, etc.)
 COPY --chown=comfyuser:comfyuser src/ /home/comfyuser/scripts/
 COPY --chown=comfyuser:comfyuser config/ /home/comfyuser/config/
