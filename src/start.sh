@@ -10,6 +10,11 @@
 
 set -Eeuo pipefail
 
+# --- CRITICAL: Fix CUDA visibility issues ---
+# CUDA_VISIBLE_DEVICES=all is invalid and hides GPUs from PyTorch
+# Let nvidia-container-runtime handle device exposure via NVIDIA_VISIBLE_DEVICES
+unset CUDA_VISIBLE_DEVICES 2>/dev/null || true
+
 # --- Environment Variables and Paths ---
 LOG_PREFIX="[STARTUP]"
 COMFYUI_DIR="/home/comfyuser/workspace/ComfyUI"
@@ -243,25 +248,18 @@ print("torch:", getattr(torch, "__version__", "unknown"))
 PY
 }
 
-# --- Decide ComfyUI flags based on GPU presence ---
-decide_comfyui_flags() {
-  local flags="${COMFYUI_FLAGS:-}"
-  
-  # Run GPU diagnostics first
-  gpu_diagnostics
-  
-  # Check CUDA availability
+# --- Check CUDA availability (separate from flag building) ---
+check_cuda_availability() {
   local has_cuda
   has_cuda="$("${PYTHON_EXEC}" -c "import torch; print('1' if torch.cuda.is_available() else '0')" 2>/dev/null || echo "0")"
   
   if [ "$has_cuda" = "1" ]; then
     log "✅ CUDA available - ComfyUI will use GPU"
+    return 0
   else
     log "❌ CUDA not available - forcing CPU mode"
-    flags="$flags --cpu"
+    return 1
   fi
-  
-  echo "$flags"
 }
 
 # --- PHASE 1: File System Setup ---
@@ -337,16 +335,29 @@ start_services() {
 
   [[ "${DEBUG_MODE:-false}" == "true" ]] && python_env_probe || true
 
-  local comfyui_flags
-  comfyui_flags="$(decide_comfyui_flags)"
+  # Run GPU diagnostics
+  gpu_diagnostics
   
-  if [[ "$comfyui_flags" == *"--cpu"* ]]; then 
+  # Build ComfyUI command args as array (no command substitution!)
+  local args=(main.py --listen 0.0.0.0 --port 8188)
+  
+  # Add base flags from environment
+  if [ -n "${COMFYUI_FLAGS:-}" ]; then
+    # Split COMFYUI_FLAGS and add to args
+    read -ra flag_array <<< "${COMFYUI_FLAGS}"
+    args+=("${flag_array[@]}")
+  fi
+  
+  # Check CUDA and add --cpu if needed
+  if ! check_cuda_availability; then
+    args+=(--cpu)
     log "⚠️ Running ComfyUI in CPU mode"
-  else 
+  else
     log "🚀 Running ComfyUI with GPU acceleration"
   fi
 
-  exec "${PYTHON_EXEC}" main.py --listen 0.0.0.0 --port 8188 ${comfyui_flags}
+  # Execute ComfyUI with clean argument array
+  exec "${PYTHON_EXEC}" "${args[@]}"
 }
 
 # --- Main Execution Flow ---

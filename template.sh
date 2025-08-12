@@ -8,7 +8,7 @@ set -euo pipefail
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 # ⚠️ IMPORTANT: Update this to your Docker Hub username and image name.
-readonly IMAGE_NAME="heapsgo0d/catalyst:v1.0.6"
+readonly IMAGE_NAME="heapsgo0d/catalyst:v1.0.6g"
 readonly TEMPLATE_NAME="ComfyUI FLUX - Project Catalyst"
 readonly CUSTOM_DNS_SERVERS="${CUSTOM_DNS_SERVERS:-"8.8.8.8,1.1.1.1"}" # Default to Google and Cloudflare
 
@@ -144,8 +144,8 @@ PAYLOAD=$(jq -n \
           { "key": "ENABLE_FORENSIC_CLEANUP", "value": "false" },
           { "key": "SECURITY_TOKEN_VAULT_PATH", "value": "/run/secrets/token" },
           { "key": "PYTHONPATH", "value": "/home/comfyuser/workspace/ComfyUI" },
-          { "key": "CUDA_VISIBLE_DEVICES", "value": "all" },
           { "key": "NVIDIA_VISIBLE_DEVICES", "value": "all" },
+          { "key": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility" },
           { "key": "OMP_NUM_THREADS", "value": "8" },
           { "key": "PYTORCH_CUDA_ALLOC_CONF", "value": "max_split_size_mb:1024" },
           { "key": "CUDA_LAUNCH_BLOCKING", "value": "0" },
@@ -162,6 +162,7 @@ echo "🚀 Sending request to create/update RunPod template..."
 echo "   Template Name: $TEMPLATE_NAME"
 echo "   Docker Image:  $IMAGE_NAME"
 echo "   Ports:         8188/http, 8080/http"
+echo "   CUDA Fix:      REMOVED CUDA_VISIBLE_DEVICES=all (was breaking PyTorch)"
 
 response=$(curl -s -w "\n%{http_code}" \
   -X POST "https://api.runpod.io/graphql" \
@@ -195,7 +196,9 @@ echo "   1. Visit RunPod Console: https://runpod.io/console/deploy"
 echo "   2. Select 'ComfyUI FLUX - Project Catalyst' template"
 echo "   3. Configure GPU and deploy"
 echo "   4. Access ComfyUI at port 8188"
-echo "   5. Port 8080 reserved for future FileBrowser implementation"
+echo "   5. Check logs for GPU diagnostics and CUDA availability"
 echo ""
-echo "🛡️ Security Note: FileBrowser placeholder configured but not yet implemented."
-echo "   This maintains consistency with your previous template structure."
+echo "🛡️ CUDA Environment Fixed:"
+echo "   - REMOVED: CUDA_VISIBLE_DEVICES=all (was invalid and hiding GPUs)"
+echo "   - ADDED: NVIDIA_DRIVER_CAPABILITIES=compute,utility"
+echo "   - KEPT: NVIDIA_VISIBLE_DEVICES=all (correct way to expose GPUs)"
