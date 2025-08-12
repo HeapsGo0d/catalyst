@@ -37,19 +37,22 @@ ENV LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64:/usr/local/cuda-12.8/targets/x86
 
 # App user with fixed UID/GID 1000 (reuse existing gid if present)
 RUN set -eux; \
-    uid=1000; gid=1000; \
-    if ! getent group "$gid" >/dev/null; then \
-        groupadd -g "$gid" comfyuser; \
-    else \
-        echo "Using existing group $(getent group $gid | cut -d: -f1) (gid=$gid)"; \
-    fi; \
-    if id -u comfyuser >/dev/null 2>&1; then \
-        usermod -u "$uid" -g "$gid" -s /bin/bash comfyuser; \
-    else \
-        useradd -m -u "$uid" -g "$gid" -s /bin/bash comfyuser; \
-    fi; \
-    mkdir -p /home/comfyuser/workspace /workspace /home/comfyuser/.cache/pip && \
-    chown -R 1000:1000 /home/comfyuser /workspace /opt/venv
+  uid=1000; gid=1000; \
+  u1000="$(getent passwd "$uid" | cut -d: -f1 || true)"; \
+  g1000="$(getent group  "$gid" | cut -d: -f1 || true)"; \
+  if [ -n "$u1000" ] && [ "$u1000" != "comfyuser" ]; then \
+    usermod -l comfyuser "$u1000"; \
+    usermod -d /home/comfyuser -m comfyuser; \
+  fi; \
+  if [ -z "$u1000" ]; then \
+    if [ -z "$g1000" ]; then groupadd -g "$gid" comfyuser; fi; \
+    useradd -m -u "$uid" -g "$gid" -s /bin/bash comfyuser; \
+  fi; \
+  if [ -n "$g1000" ] && [ "$g1000" != "comfyuser" ]; then \
+    groupmod -n comfyuser "$g1000" || true; \
+  fi; \
+  mkdir -p /home/comfyuser/workspace /workspace /home/comfyuser/.cache/pip; \
+  chown -R 1000:1000 /home/comfyuser /workspace /opt/venv
 ENV HOME=/home/comfyuser
 ENV PIP_CACHE_DIR=/home/comfyuser/.cache/pip
 
