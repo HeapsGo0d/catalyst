@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
         python3.11 python3.11-venv python3.11-dev \
         build-essential gcc ninja-build \
-        git curl jq aria2 git-lfs \
+        git curl jq aria2 git-lfs gosu \
         ffmpeg libgl1 libglib2.0-0 wget ca-certificates vim && \
     printf "/usr/local/cuda-12.8/lib64\n/usr/local/cuda-12.8/targets/x86_64-linux/lib\n" > /etc/ld.so.conf.d/cuda.conf && ldconfig && \
     rm -rf /var/lib/apt/lists/*

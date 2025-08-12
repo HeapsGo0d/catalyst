@@ -1,11 +1,11 @@
 #!/bin/bash
 # ==================================================================================
-# CATALYST STARTUP (RunPod / ComfyUI) — quiet edition with idempotent downloads
+# CATALYST STARTUP (RunPod / ComfyUI) — with GPU diagnostics and ownership fix
+# - Root ownership fix for volume mount permissions
+# - Comprehensive GPU diagnostics
 # - Network readiness checks
-# - Safe Python probe (no GPU touch)
-# - Auto CPU fallback when no CUDA
+# - Safe Python probe (no GPU touch during setup)
 # - Idempotent downloads (no re-download on restart)
-# - No file organization needed (downloads go directly to final locations)
 # ==================================================================================
 
 set -Eeuo pipefail
@@ -34,12 +34,135 @@ log_debug() { [ "${LOG_LEVEL}" = "debug" ] && log "[debug] $*"; }
 log_error() { echo "$(date '+%Y-%m-%d %H:%M:%S') ${LOG_PREFIX} [ERROR] $*" | tee -a "${STARTUP_ERROR_LOG}"; }
 
 # --- Make DEBUG_MODE control global verbosity ---
-# If DEBUG_MODE=true, flip the whole script to verbose logging.
 if [[ "${DEBUG_MODE:-false}" == "true" ]]; then
   LOG_LEVEL=debug
   export DEBUG_MODE=true
 fi
 
+# --- Root Ownership Fix Function ---
+fix_workspace_ownership() {
+  log "Fixing workspace ownership (running as root)..."
+  
+  # Ensure critical directories exist first
+  mkdir -p /home/comfyuser/workspace/ComfyUI/temp
+  mkdir -p /home/comfyuser/workspace/ComfyUI/user/default/{workflows,models,settings}
+  mkdir -p /home/comfyuser/workspace/ComfyUI/models/{checkpoints,loras,vae,diffusers}
+  mkdir -p /home/comfyuser/workspace/{models,input,output,debug}
+  mkdir -p /home/comfyuser/workspace/downloads_tmp/huggingface/.hf
+  
+  # Fix ownership recursively
+  chown -R 1000:1000 /home/comfyuser/workspace/
+  chown -R 1000:1000 /opt/venv/
+  
+  # Set proper permissions
+  chmod -R u+rwX /home/comfyuser/workspace/ComfyUI/
+  chmod -R u+rwX /home/comfyuser/workspace/models/
+  chmod -R u+rwX /home/comfyuser/workspace/input/
+  chmod -R u+rwX /home/comfyuser/workspace/output/
+  
+  # Verify critical paths are writable
+  local critical_paths=(
+    "/home/comfyuser/workspace/ComfyUI"
+    "/home/comfyuser/workspace/ComfyUI/temp"
+    "/home/comfyuser/workspace/ComfyUI/user"
+  )
+  
+  for path in "${critical_paths[@]}"; do
+    if [[ ! -w "$path" ]]; then
+      log_error "CRITICAL: Path not writable after ownership fix: $path"
+      exit 1
+    fi
+  done
+  
+  log "✅ Workspace ownership fixed and verified"
+}
+
+# --- Check if we need to run ownership fix ---
+needs_ownership_fix() {
+  # If running as root and workspace exists but isn't owned by comfyuser
+  if [[ "$(id -u)" -eq 0 ]] && [[ -d /home/comfyuser/workspace ]]; then
+    local workspace_owner
+    workspace_owner=$(stat -c '%u' /home/comfyuser/workspace 2>/dev/null || echo "unknown")
+    if [[ "$workspace_owner" != "1000" ]]; then
+      return 0  # needs fix
+    fi
+    
+    # Also check if ComfyUI temp dir is writable by comfyuser
+    if [[ -d "$COMFYUI_DIR" ]] && [[ ! -w "$COMFYUI_DIR" ]]; then
+      return 0  # needs fix
+    fi
+  fi
+  
+  return 1  # no fix needed
+}
+
+# --- Drop to comfyuser and re-exec ---
+drop_privileges_and_reexec() {
+  log "Dropping privileges and re-executing as comfyuser..."
+  
+  # Install gosu if not present (shouldn't be needed in our image)
+  if ! command -v gosu >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq gosu
+  fi
+  
+  # Re-execute this script as comfyuser
+  exec gosu comfyuser "$0" "$@"
+}
+
+# --- GPU Diagnostics ---
+gpu_diagnostics() {
+  log "=== GPU DIAGNOSTICS ==="
+  
+  # Check GPU devices
+  log "[GPU DEBUG] GPU Devices:"
+  if ls -l /dev/nvidia* 2>/dev/null; then
+    log "✅ NVIDIA devices found"
+  else
+    log "❌ No NVIDIA devices found in /dev/"
+  fi
+  
+  # Check nvidia-smi
+  log "[GPU DEBUG] nvidia-smi output:"
+  if nvidia-smi 2>/dev/null; then
+    log "✅ nvidia-smi succeeded"
+  else
+    log "❌ nvidia-smi failed or not available"
+  fi
+  
+  # Check CUDA libraries
+  log "[GPU DEBUG] CUDA Libraries:"
+  if ldconfig -p | grep libcuda; then
+    log "✅ CUDA libraries found"
+  else
+    log "❌ CUDA libraries not found"
+  fi
+  
+  # Check PyTorch CUDA
+  log "[GPU DEBUG] PyTorch CUDA Status:"
+  "${PYTHON_EXEC}" - <<'PY'
+import torch
+import os
+print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+print(f"torch.cuda.device_count(): {torch.cuda.device_count()}")
+print(f"CUDA_VISIBLE_DEVICES: {os.getenv('CUDA_VISIBLE_DEVICES', 'not set')}")
+print(f"torch.version.cuda: {torch.version.cuda}")
+if torch.cuda.is_available():
+    print(f"GPU 0 name: {torch.cuda.get_device_name(0)}")
+    print(f"GPU 0 memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+else:
+    print("No CUDA devices available to PyTorch")
+
+# Test CUDA library loading
+try:
+    import ctypes
+    ctypes.CDLL('libcuda.so.1')
+    print("✅ libcuda.so.1 loaded successfully")
+except Exception as e:
+    print(f"❌ Failed to load libcuda.so.1: {e}")
+PY
+  
+  log "=== END GPU DIAGNOSTICS ==="
+}
 
 # --- Signal Handling for Graceful Shutdown ---
 term_handler() {
@@ -67,7 +190,6 @@ wait_for_path() {
   return 0
 }
 
-
 # --- Network Readiness Check ---
 wait_for_network_ready() {
   local tmo="${1:-90}"
@@ -89,8 +211,7 @@ wait_for_network_ready() {
   return 1
 }
 
-
-# --- Safe Python/ComfyUI probe (no GPU-touching imports) ---
+# --- Safe Python/ComfyUI probe (no GPU-touching imports during setup) ---
 python_env_probe() {
   log_debug "Probing Python/ComfyUI…"
   "${PYTHON_EXEC}" - <<'PY' || true
@@ -101,7 +222,7 @@ try:
     print("Torch:", getattr(torch, "__version__", "unknown"))
 except Exception as e:
     print("Torch probe failed:", e)
-# Only safe ComfyUI modules to avoid CUDA noise
+# Only safe ComfyUI modules to avoid CUDA noise during setup
 sys.path.insert(0, "/home/comfyuser/workspace/ComfyUI")
 for m in ("folder_paths", "utils"):
     try:
@@ -122,11 +243,24 @@ print("torch:", getattr(torch, "__version__", "unknown"))
 PY
 }
 
-# --- Decide ComfyUI flags based on GPU presence (pure; no logging) ---
+# --- Decide ComfyUI flags based on GPU presence ---
 decide_comfyui_flags() {
-  local flags="${COMFYUI_FLAGS:-}" has_cuda
-  has_cuda="$("${PYTHON_EXEC}" -c "import torch, sys; sys.stdout.write('1' if torch.cuda.is_available() else '0')" 2>/dev/null || echo "0")"
-  [ "$has_cuda" = "0" ] && flags="$flags --cpu"
+  local flags="${COMFYUI_FLAGS:-}"
+  
+  # Run GPU diagnostics first
+  gpu_diagnostics
+  
+  # Check CUDA availability
+  local has_cuda
+  has_cuda="$("${PYTHON_EXEC}" -c "import torch; print('1' if torch.cuda.is_available() else '0')" 2>/dev/null || echo "0")"
+  
+  if [ "$has_cuda" = "1" ]; then
+    log "✅ CUDA available - ComfyUI will use GPU"
+  else
+    log "❌ CUDA not available - forcing CPU mode"
+    flags="$flags --cpu"
+  fi
+  
   echo "$flags"
 }
 
@@ -139,28 +273,7 @@ setup_filesystem() {
     "/home/comfyuser/workspace/input" "/home/comfyuser/workspace/output" "/home/comfyuser/workspace/debug"
   )
   mkdir -p "${dirs[@]}" || { log_error "Failed to create workspace dirs"; return 1; }
-  chown -R comfyuser:comfyuser /home/comfyuser/workspace/ 2>/dev/null || true
   touch "${MODELS_DIR}/.catalyst_models" "${DOWNLOADS_TMP}/.catalyst_downloads" || true
-  
-  # CRITICAL: Ensure ComfyUI directories exist and are writable (after volume mounts)
-  # This fixes the "Permission denied: '/home/comfyuser/workspace/ComfyUI/user'" crash
-  if [ -d "${COMFYUI_DIR}" ]; then
-    log_debug "Creating ComfyUI user directories post-mount..."
-    mkdir -p "${COMFYUI_DIR}/user/default/workflows" "${COMFYUI_DIR}/user/default/models" "${COMFYUI_DIR}/user/default/settings"
-    # Force ownership fix in case volume mount changed it to root
-    chown -R comfyuser:comfyuser "${COMFYUI_DIR}/user"
-    chmod -R u+rwX "${COMFYUI_DIR}/user"
-    
-    # Also ensure models directory has correct permissions
-    mkdir -p "${COMFYUI_DIR}/models/checkpoints" "${COMFYUI_DIR}/models/loras" "${COMFYUI_DIR}/models/vae" "${COMFYUI_DIR}/models/diffusers"
-    chown -R comfyuser:comfyuser "${COMFYUI_DIR}/models"
-    chmod -R u+rwX "${COMFYUI_DIR}/models"
-    
-    log_debug "ComfyUI directory permissions fixed"
-  else
-    log_error "ComfyUI directory not found: ${COMFYUI_DIR}"
-    return 1
-  fi
   
   log "Filesystem ready"
   return 0
@@ -224,27 +337,45 @@ start_services() {
 
   [[ "${DEBUG_MODE:-false}" == "true" ]] && python_env_probe || true
 
-  local comfyui_flags; comfyui_flags="$(decide_comfyui_flags 2>/dev/null)"; [ -n "$comfyui_flags" ] || comfyui_flags=""
-  if [[ "$comfyui_flags" == *"--cpu"* ]]; then log "Running ComfyUI in CPU mode"; else log "Running ComfyUI with CUDA"; fi
+  local comfyui_flags
+  comfyui_flags="$(decide_comfyui_flags)"
+  
+  if [[ "$comfyui_flags" == *"--cpu"* ]]; then 
+    log "⚠️ Running ComfyUI in CPU mode"
+  else 
+    log "🚀 Running ComfyUI with GPU acceleration"
+  fi
 
   exec "${PYTHON_EXEC}" main.py --listen 0.0.0.0 --port 8188 ${comfyui_flags}
 }
 
-# --- Main ---
+# --- Main Execution Flow ---
 main() {
-  log "Init…"
+  log "Catalyst startup beginning..."
+  
+  # Check if we need to fix ownership as root
+  if needs_ownership_fix; then
+    fix_workspace_ownership
+    drop_privileges_and_reexec "$@"
+    # This line should never be reached
+    exit 1
+  fi
+  
+  # Now running as comfyuser - proceed with normal startup
+  log "Running as user: $(whoami) (UID: $(id -u))"
+  
   setup_filesystem     || { log_error "FS setup failed"; exit 1; }
   security_init        || true
   execute_downloads    || log_debug "Download phase returned nonzero"
-  # NOTE: No file organization needed - downloads go directly to final locations
   start_services
 }
 
 # --- Pre-start Validation ---
+log "=== CATALYST STARTUP ==="
 log "Pre-start validation…"
 [ -d "${COMFYUI_DIR}" ] || { log_error "ComfyUI dir missing: ${COMFYUI_DIR}"; exit 1; }
 [ -f "${PYTHON_EXEC}" ] || { log_error "Python missing: ${PYTHON_EXEC}"; exit 1; }
 [ -d "${SCRIPTS_DIR}" ] || { log_error "Scripts dir missing: ${SCRIPTS_DIR}"; exit 1; }
 
-log "Validation OK"
-main
+log "✅ Validation passed"
+main "$@"
