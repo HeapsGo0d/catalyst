@@ -15,6 +15,29 @@ set -Eeuo pipefail
 # Let nvidia-container-runtime handle device exposure via NVIDIA_VISIBLE_DEVICES
 unset CUDA_VISIBLE_DEVICES 2>/dev/null || true
 
+# --- CRITICAL: Root ownership fix for volume mounts ---
+# If running as root, fix ownership then re-exec as comfyuser
+if [ "$(id -u)" -eq 0 ]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [STARTUP] Running as root - fixing workspace ownership..."
+  
+  # Create critical directories with correct ownership
+  install -d -m 0770 -o comfyuser -g comfyuser "/home/comfyuser/workspace/ComfyUI/temp"
+  install -d -m 0770 -o comfyuser -g comfyuser "/home/comfyuser/workspace/ComfyUI/user/default/workflows"
+  install -d -m 0770 -o comfyuser -g comfyuser "/home/comfyuser/workspace/ComfyUI/user/default/models"
+  install -d -m 0770 -o comfyuser -g comfyuser "/home/comfyuser/workspace/ComfyUI/user/default/settings"
+  
+  # Fix ownership recursively
+  chown -R comfyuser:comfyuser "/home/comfyuser/workspace"
+  
+  # Validation logging
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [STARTUP] Ownership validation:"
+  ls -ld /home/comfyuser/workspace/ComfyUI /home/comfyuser/workspace/ComfyUI/temp || true
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [STARTUP] Container UIDs: $(id -u):$(id -g)"
+  
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [STARTUP] ✅ Ownership fixed - dropping privileges and re-executing as comfyuser..."
+  exec gosu comfyuser "$0" "$@"
+fi
+
 # --- Environment Variables and Paths ---
 LOG_PREFIX="[STARTUP]"
 COMFYUI_DIR="/home/comfyuser/workspace/ComfyUI"

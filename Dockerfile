@@ -34,8 +34,8 @@ ENV PIP="${VIRTUAL_ENV}/bin/pip"
 ENV LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64:/usr/local/cuda-12.8/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}"
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 
-# App user + workspace
-RUN useradd -m comfyuser && \
+# App user + workspace (use fixed UID 1000 to match common volume mounts)
+RUN groupadd -g 1000 comfyuser && useradd -m -u 1000 -g 1000 comfyuser && \
     mkdir -p /home/comfyuser/workspace /workspace && \
     chown -R comfyuser:comfyuser /home/comfyuser /workspace /opt/venv
 ENV HOME=/home/comfyuser
